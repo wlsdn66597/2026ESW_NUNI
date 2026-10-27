@@ -1,0 +1,14 @@
+# atlas 기기에는 MQTT 브로커가 없다(2026-09-28 확인). build_mosquitto.sh로 만든 브로커를 이 유닛으로 띄운다.
+[Unit]
+Description=Mosquitto MQTT broker for Nuni (ESP32 sensors <-> Pi 4)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/data/share/usr/atlas/services/com.atlas.NuniFusion1/mosquitto/mosquitto -c /data/share/usr/atlas/services/com.atlas.NuniFusion1/mosquitto/mosquitto.conf
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

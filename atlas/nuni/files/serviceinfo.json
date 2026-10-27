@@ -1,0 +1,8 @@
+{
+  "id": "com.atlas.NuniFusion1",
+  "description": "숨결지기 융합 서비스 — 레이더·울음·환경을 합쳐 영유아 수면 상태와 경보를 판단한다",
+  "name": "nunifusion",
+  "type": "native",
+  "entry": "nunifusion",
+  "version": "0.1.0"
+}

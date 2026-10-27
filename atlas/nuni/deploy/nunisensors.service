@@ -1,0 +1,18 @@
+[Unit]
+Description=Nuni Pi4 wired USB sensor hub
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/data/nuni/sensors/nunisensors
+Environment=NUNI_MQTT_HOST=10.77.0.5
+Environment=NUNI_ENV_PORT=/dev/nuni-env
+Environment=NUNI_RADAR_PORT=/dev/nuni-radar
+Environment=NUNI_TOF_DROP_MM=150
+Environment=NUNI_TOF_HOLD_S=3
+Environment=NUNI_TOF_CLEAR_S=5
+Environment=NUNI_SOOTHE_COOLDOWN=180
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

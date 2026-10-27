@@ -1,0 +1,2 @@
+-r appliance_bridge/requirements.txt
+numpy>=1.26

@@ -1,0 +1,15 @@
+[Unit]
+Description=NUNI ThinQ SDK mock policy (Pi5, no cloud actuation)
+After=network-online.target nuni-mosquitto.service
+Wants=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=/data/nuni/appliances/current/code
+Environment=PYTHONPATH=/data/nuni/appliances/current/vendor
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/data/nuni/appliances/current/python/bin/python3 -u /data/nuni/appliances/current/code/policy.py --host 127.0.0.1 --on-below 22 --off-at 22.5 --hold 3
+Restart=always
+RestartSec=3
+TimeoutStopSec=5
+[Install]
+WantedBy=multi-user.target

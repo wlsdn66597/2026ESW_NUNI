@@ -1,0 +1,46 @@
+# Local configuration
+.env
+.env.*
+!.env.example
+**/secrets.yaml
+**/secrets.h
+**/secrets.env
+**/devices.json
+**/devices.*.json
+*.pem
+*.key
+# Build and dependency files
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.pio/
+.esphome/
+.dart_tool/
+build/
+vendor/
+node_modules/
+dist/
+# Runtime records and generated models
+/data/
+/results/
+/reports/
+cry_model/artifacts*/
+cry_model/data/
+cry_model/noise/
+cry_model/rir/
+*.wav
+!atlas/nuni/files/voice/parent.wav
+*.mp3
+*.f32
+*.npy
+*.keras
+*.tflite
+!atlas/nuni/files/model/yamnet_emb.tflite
+*.zip
+*.tar.gz
+*.log
+.DS_Store
+Thumbs.db

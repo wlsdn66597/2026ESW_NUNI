@@ -1,0 +1,14 @@
+[Unit]
+Description=Start NUNI dashboard app (com.atlas.app.nuni_dashboard) after boot
+# atlas는 부팅하면 홈 앱(com.atlas.app.home)을 먼저 띄운다. 그 뒤에 대시보드를 앞으로 올린다.
+After=app-manager.service window-manager.service am.com.atlas.app.home.service nunifusion.service
+Wants=app-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 앱 매니저·창 관리자가 준비될 때까지 2초 간격으로 최대 60초 다시 시도한다(BusyBox 셸).
+ExecStart=/bin/sh -c 'i=0; while [ $i -lt 30 ]; do busctl --system call com.atlas.AppManager1 /com/atlas/AppManager1 com.atlas.AppManager1 Start s com.atlas.app.nuni_dashboard && exit 0; i=$((i+1)); sleep 2; done; exit 1'
+
+[Install]
+WantedBy=multi-user.target

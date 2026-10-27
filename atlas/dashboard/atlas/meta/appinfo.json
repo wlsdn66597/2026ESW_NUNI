@@ -1,0 +1,8 @@
+{
+    "id": "com.atlas.app.nuni_dashboard",
+    "type": "flutter",
+    "name": "숨결지기",
+    "description": "아기 수면 상태와 울음 도우미(무엇으로 그쳤는지 기록)",
+    "entry": "nuni_dashboard --bundle=./ --fullscreen -a com.atlas.app.nuni_dashboard",
+    "version": "1.0.0"
+}

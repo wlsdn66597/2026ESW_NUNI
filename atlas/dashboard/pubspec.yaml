@@ -1,0 +1,33 @@
+name: nuni_dashboard
+description: "숨결지기 대시보드 — 아기 수면 상태와 울음 도우미(LG atlas Flutter 앱)"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.6.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dbus: ^0.7.12   # LG 샘플(ai-native-os-sample-flutter)과 같은 D-Bus 클라이언트
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/nuni_penguin_black.png
+    - assets/images/penguin_calm.png
+    - assets/images/penguin_crying.png
+  # SIL Open Font License 1.1(글꼴 안의 라이선스 정보 유지, assets/fonts/FONTS.md). tool/subset_fonts.py로 줄인 것
+  fonts:
+    - family: NotoSansKR
+      fonts:
+        - asset: assets/fonts/NotoSansKR-VF.ttf
+    - family: NotoSerifKR
+      fonts:
+        - asset: assets/fonts/NotoSerifKR-VF.ttf

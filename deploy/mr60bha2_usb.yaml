@@ -1,0 +1,24 @@
+# USB-only XIAO ESP32-C6 + MR60BHA2. No Wi-Fi, MQTT, API or OTA dependency.
+esphome:
+  name: nuni-radar-usb
+esp32:
+  board: seeed_xiao_esp32c6
+  framework:
+    type: esp-idf
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [nuni_mr60_serial]
+uart:
+  id: radar_uart
+  tx_pin: GPIO16
+  rx_pin: GPIO17
+  baud_rate: 115200
+  parity: NONE
+  stop_bits: 1
+nuni_mr60_serial:
+  uart_id: radar_uart

@@ -1,0 +1,15 @@
+[Unit]
+Description=NUNI wired USB appliance demonstrators (Pi4)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=/data/nuni/appliances/current/code
+Environment=PYTHONPATH=/data/nuni/appliances/current/vendor
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/data/nuni/appliances/current/python/bin/python3 -u /data/nuni/appliances/current/code/gateway.py --host 10.77.0.5 --config /data/nuni/appliances/devices.json
+Restart=always
+RestartSec=3
+TimeoutStopSec=5
+[Install]
+WantedBy=multi-user.target

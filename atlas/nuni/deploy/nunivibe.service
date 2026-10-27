@@ -1,0 +1,17 @@
+# 파이 4 진동 노드 — 파이 5 브로커의 fusion/alert를 받아 GPIO로 진동 모듈을 켠다.
+# 설치: deploy/setup_vibe_on_device.sh (nunivibe를 /data/nuni/vibe에 두고 이 유닛을 등록한다)
+[Unit]
+Description=Nuni vibration node (fusion/alert -> GPIO)
+After=network-online.target peripheral-manager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/data/nuni/vibe/nunivibe
+Environment=NUNI_MQTT_HOST=10.77.0.5
+Environment=NUNI_VIBE_GPIO=18
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

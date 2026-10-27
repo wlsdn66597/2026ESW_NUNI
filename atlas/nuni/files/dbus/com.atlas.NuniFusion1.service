@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=com.atlas.NuniFusion1
+Exec=/data/share/usr/atlas/services/com.atlas.NuniFusion1/nunifusion
+User=root
+SystemdService=nunifusion.service

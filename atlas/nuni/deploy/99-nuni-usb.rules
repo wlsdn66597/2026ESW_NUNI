@@ -1,0 +1,3 @@
+# MR60 XIAO ESP32-C6 USB serial endpoint.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", SYMLINK+="nuni-radar"
+# Register environment/appliance ESPs with appliance_bridge/deploy/enroll_usb.sh.

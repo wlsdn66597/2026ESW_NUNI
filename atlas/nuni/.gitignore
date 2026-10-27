@@ -1,0 +1,10 @@
+# 모델 및 로컬 런타임 파일
+files/model/*
+!files/model/cry_personal_ctx.json
+!files/model/yamnet_emb.tflite
+!files/model/yamnet_class_map.csv
+!files/model/README.md
+!files/model/LICENSE-YAMNET.txt
+files/lib/
+files/mosquitto/
+build/
