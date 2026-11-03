@@ -33,6 +33,31 @@ class SdbusService : public DbusService {
             sdbus::registerMethod("GetAlerts").withOutputParamNames("alerts_json").implementedAs([this]() {
               return h_.get_alerts ? h_.get_alerts() : std::string("[]");
             }),
+            sdbus::registerMethod("GetHistorySummary")
+                .withInputParamNames("from_s", "to_s", "limit").withOutputParamNames("history_json")
+                .implementedAs([this](int64_t from,int64_t to,uint32_t limit) {
+                  return h_.get_history_summary ? h_.get_history_summary(from,to,limit)
+                    : dump(Json{{"ok",false},{"error","history unavailable"}});
+                }),
+            sdbus::registerMethod("GetSensorHistory")
+                .withInputParamNames("from_s", "to_s", "limit").withOutputParamNames("history_json")
+                .implementedAs([this](int64_t from,int64_t to,uint32_t limit) {
+                  return h_.get_sensor_history ? h_.get_sensor_history(from,to,limit)
+                    : dump(Json{{"ok",false},{"error","history unavailable"}});
+                }),
+            sdbus::registerMethod("GetRecordedEvents")
+                .withInputParamNames("from_s", "to_s", "limit", "after_id").withOutputParamNames("events_json")
+                .implementedAs([this](int64_t from,int64_t to,uint32_t limit,int64_t after) {
+                  return h_.get_recorded_events ? h_.get_recorded_events(from,to,limit,after)
+                    : dump(Json{{"ok",false},{"error","history unavailable"}});
+                }),
+            sdbus::registerMethod("GetEnvironmentHistory")
+                .withInputParamNames("from_s", "to_s", "limit")
+                .withOutputParamNames("history_json")
+                .implementedAs([this](int64_t from,int64_t to,uint32_t limit) {
+                  return h_.get_environment_history ? h_.get_environment_history(from,to,limit)
+                    : dump(Json{{"ok",false},{"error","history unavailable"}});
+                }),
             sdbus::registerMethod("GetCryLog").withOutputParamNames("log_json").implementedAs([this]() {
               return h_.get_cry_log ? h_.get_cry_log() : std::string("{}");
             }),

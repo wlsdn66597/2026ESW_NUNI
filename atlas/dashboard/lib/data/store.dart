@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'models.dart';
+import 'history_models.dart';
 
 enum Link { connecting, ok, lost }
 
@@ -14,6 +15,11 @@ abstract class NuniStore extends ChangeNotifier {
   Sensors sensors = const Sensors();
   CryLogView? cry;
   List<AlertEvent> alerts = const [];
+  bool get usesDatabaseHistory => false;
+  HistoryView? recordedHistory;
+  bool historyLoading = false;
+  String? historyError;
+  Future<void> refreshHistory() async {}
 
   /// 최근 15분 호흡수(레이더가 아기를 잡고 호흡을 잰 때만)
   final List<(DateTime, double)> breathHistory = [];
@@ -79,12 +85,19 @@ abstract class NuniStore extends ChangeNotifier {
 
   void recordBreath(Radar r) {
     final br = r.breathingRate;
-    if (!r.presence || !r.breathValid || br == null || !br.isFinite || br <= 0)
+    if (!r.presence ||
+        !r.breathValid ||
+        br == null ||
+        !br.isFinite ||
+        br <= 0) {
       return;
+    }
     if (r.sampleId != null && r.sampleId == _lastBreathSample) return;
     final now = DateTime.now();
     if (breathHistory.isNotEmpty &&
-        now.difference(breathHistory.last.$1).inMilliseconds < 900) return;
+        now.difference(breathHistory.last.$1).inMilliseconds < 900) {
+      return;
+    }
     breathHistory.add((now, br));
     _lastBreathSample = r.sampleId;
     breathHistory.removeWhere((e) => now.difference(e.$1).inMinutes >= 15);

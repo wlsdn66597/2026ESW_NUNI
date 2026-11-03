@@ -33,6 +33,7 @@ extern char **environ;
 #include <vector>
 
 #include "nuni/audio_source.hpp"
+#include "nuni/history_store.hpp"
 #include "nuni/cry_detector.hpp"
 #include "nuni/cry_log.hpp"
 #include "nuni/fusion.hpp"
@@ -109,6 +110,10 @@ struct Options {
   std::string pulse_server = env_str("NUNI_PULSE_SERVER"), pulse_source = env_str("NUNI_PULSE_SOURCE");
   std::string wav = env_str("NUNI_CRY_WAV");  // 지정하면 마이크 대신 이 파일을 반복 재생
   // 울음 기록(부모 답 쌓기 + 힌트). 기록 폴더는 패키지를 다시 깔아도 남는 /data 아래에 둔다
+  bool history = env_on("NUNI_ENABLE_HISTORY", true);
+  std::string history_db = env_str("NUNI_HISTORY_DB", "/data/nuni/nuni.db");
+  int history_days = static_cast<int>(env_num("NUNI_HISTORY_DAYS", 30));
+  int history_mib = static_cast<int>(env_num("NUNI_HISTORY_MAX_MIB", 64));
   bool crylog = env_on("NUNI_ENABLE_CRYLOG", true);
   std::string cry_dir = env_str("NUNI_CRY_DIR", "/data/nuni/cry");
   std::string cry_ctx = env_str("NUNI_CRY_CTX", exe_dir() + "/cry_personal_ctx.json");
@@ -135,6 +140,8 @@ void usage(const char* argv0) {
             << "  --engine E              추론 엔진 auto|ecoai|tflite (NUNI_YAMNET_ENGINE; 기본 auto = ECO.AI → TFLite)\n"
             << "그 밖의 환경변수: NUNI_ECOAI_BACKEND(cpu|gpu), NUNI_CRY_THRESHOLD, NUNI_YAMNET_THREADS,\n"
             << "  NUNI_PULSE_SERVER, NUNI_PULSE_SOURCE,\n"
+            << "  환경 DB: NUNI_ENABLE_HISTORY(1), NUNI_HISTORY_DB(/data/nuni/nuni.db),\n"
+            << "  NUNI_HISTORY_DAYS(30; 7..365), NUNI_HISTORY_MAX_MIB(64; 4..1024),\n"
             << "  울음 기록: NUNI_ENABLE_CRYLOG(1), NUNI_CRY_DIR(/data/nuni/cry), NUNI_CRY_CTX, NUNI_CRY_RECORD(1),\n"
             << "  NUNI_CRY_END_GAP(8초), NUNI_CRY_MIN_WINDOWS(3),\n"
             << "  NUNI_FUSION_CRY_THRESHOLD, 레이더 게이팅 값(NUNI_BR_MIN 등, radar_bridge.py와 같음)\n"
@@ -232,12 +239,13 @@ using CryEventFn = std::function<void(const CryLog::Event&)>;
 
 // 울음 감지 스레드: 1초마다 최근 1.5초로 판정해 audio/cry를 발행한다.
 // 울음 기록이 켜져 있으면 그 1초의 점수·임베딩·소리(지난 1초, 16kHz)를 넘겨 울음 구간을 나눈다.
-void cry_loop(const Options& o, MqttClient& mqtt, CryLog* cry_log, const CryEventFn& on_cry_event) {
+void cry_loop(const Options& o, MqttClient& mqtt, CryLog* cry_log, const CryEventFn& on_cry_event, HistoryStore* history) {
 #if !defined(NUNI_WITH_TFLITE) && !defined(NUNI_WITH_ECOAI)
   (void)o;
   (void)mqtt;
   (void)cry_log;
   (void)on_cry_event;
+  (void)history;
   std::cerr << "[cry] ECO.AI·TFLite 없이 빌드됨 — 울음 감지 끔\n";
 #else
   std::unique_ptr<AudioModel> model;
@@ -261,6 +269,7 @@ void cry_loop(const Options& o, MqttClient& mqtt, CryLog* cry_log, const CryEven
   bool started = src->start();
   auto last_try = std::chrono::steady_clock::now();
   auto next = std::chrono::steady_clock::now();
+  const std::string audio_boot_id="audio-"+std::to_string(getpid())+"-"+std::to_string(wall_now());
   long n = 0;
   bool warned = false;
   while (!g_stop) {
@@ -283,8 +292,9 @@ void cry_loop(const Options& o, MqttClient& mqtt, CryLog* cry_log, const CryEven
     CryResult detail;
     auto msg = det.classify(ring.last(1.5), o.mic_sr, o.cry_threshold, ts, &detail);
     if (!msg) continue;
-    (*msg)["boot_id"]="audio-"+std::to_string(getpid());
+    (*msg)["boot_id"]=audio_boot_id;
     (*msg)["seq"]=n+1;
+    if(history) history->record(topics::CRY,*msg,ts);
     mqtt.publish(topics::CRY, dump(*msg));
     if (cry_log) {
       const auto sec = resample_linear(ring.last(1.0), o.mic_sr);  // 겹치지 않는 지난 1초(녹음용)
@@ -316,6 +326,25 @@ int main(int argc, char** argv) {
   MqttClient mqtt(o.host, o.port, "nunifusion-" + std::to_string(getpid()));
   if (!o.user.empty()) mqtt.set_credentials(o.user, o.pass);
 
+  std::unique_ptr<HistoryStore> history;
+  if (o.history) {
+    try {
+      HistoryStore::Config config;
+      config.path=o.history_db; config.retention_days=o.history_days; config.max_mib=o.history_mib;
+      history=std::make_unique<HistoryStore>(config);
+      const auto imported=history->import_cry_log(o.cry_dir+"/cry_log.json");
+      std::cerr << "[history] cry JSON import: " << dump(imported) << "\n";
+      std::cerr << "[history] database: " << o.history_db << "\n";
+    } catch (const std::exception& e) {
+      std::cerr << "[history] unavailable: " << e.what() << " (sensor service continues)\n";
+    }
+  }
+
+  const auto publish_recorded = [&](const std::string& topic,const Json& payload) {
+    if(history) history->record(topic,payload,wall_now());
+    return mqtt.publish(topic,dump(payload));
+  };
+
   // 울음 기록(부모 답 쌓기 + 1·2순위 힌트)
   std::unique_ptr<CryLog> cry_log;
   if (o.cry && o.crylog) {
@@ -338,7 +367,7 @@ int main(int argc, char** argv) {
     const char* topic = topics::CRY_EPISODE;  // start · end · drop
     if (ev.kind == "hint") topic = topics::CRY_HINT;
     else if (ev.kind == "answer" || ev.kind == "not" || ev.kind == "feed") topic = topics::CRY_FEEDBACK;
-    mqtt.publish(topic, dump(ev.data));
+    publish_recorded(topic,ev.data);
     if (dbus_ptr) dbus_ptr->emit_cry_event(ev.data);
     if (ev.kind == "start" || ev.kind == "end" || ev.kind == "answer")
       std::cerr << "[crylog] " << ev.kind << " " << ev.data.value("id", "") << "\n";
@@ -348,6 +377,18 @@ int main(int argc, char** argv) {
   std::unique_ptr<DbusService> dbus;
   if (o.dbus) {
     DbusHandlers h;
+    h.get_history_summary = [&](int64_t from,int64_t to,uint32_t limit) {
+      return dump(history ? history->summary(from,to,limit) : Json{{"ok",false},{"error","history unavailable"}});
+    };
+    h.get_sensor_history = [&](int64_t from,int64_t to,uint32_t limit) {
+      return dump(history ? history->sensor_history(from,to,limit) : Json{{"ok",false},{"error","history unavailable"}});
+    };
+    h.get_recorded_events = [&](int64_t from,int64_t to,uint32_t limit,int64_t after) {
+      return dump(history ? history->events(from,to,limit,after) : Json{{"ok",false},{"error","history unavailable"}});
+    };
+    h.get_environment_history = [&](int64_t from,int64_t to,uint32_t limit) {
+      return dump(history ? history->query(from,to,limit) : Json{{"ok",false},{"error","history unavailable"}});
+    };
     h.get_alerts = [&] {
       std::lock_guard<std::mutex> lk(alerts_mu);
       Json a = Json::array();
@@ -383,7 +424,7 @@ int main(int argc, char** argv) {
 
   // fusion이 발행하는 메시지 → MQTT(+ D-Bus 신호)
   Fusion fusion([&](const std::string& topic, const Json& payload) {
-    mqtt.publish(topic, dump(payload));
+    publish_recorded(topic,payload);
     if (topic == topics::ALERT) {
       std::lock_guard<std::mutex> lk(alerts_mu);
       alerts.push_back(payload);
@@ -407,6 +448,9 @@ int main(int argc, char** argv) {
   if (o.fusion)
     for (const char* t : {topics::RADAR, topics::CRY, topics::ENV}) mqtt.subscribe(t);
 
+  if (history) for(const char* topic:{topics::ENV,topics::RADAR,topics::CRY,"cry/#",topics::ALERT,topics::TOF_EVENT,"control/#"})
+    mqtt.subscribe(topic);
+
   // Pi 4 has already processed ToF. Pi 5 receives only fresh entry events.
   SootheGate soothe_gate;
   VoicePlayer voice(o.pulse_server, o.soothe_sink, o.soothe_volume);
@@ -422,6 +466,9 @@ int main(int argc, char** argv) {
     ++n_in;
     if (o.radar && topic.rfind(radar.config().prefix + "/", 0) == 0) radar.on_esphome(topic, raw, steady_now());
     if (mqtt.message_retained()) return; // snapshots/commands cannot become new observations
+    if (history) {
+      if (auto sample=parse_payload(raw)) history->record(topic,*sample,wall_now());
+    }
     if (o.soothe && topic == topics::PI4_STATUS) {
       if (auto j = parse_payload(raw)) soothe_gate.heartbeat(*j, steady_now());
       return;
@@ -434,8 +481,8 @@ int main(int argc, char** argv) {
       const bool started = !cooldown && voice.play(o.soothe_wav,&why);
       if(cooldown) why="cooldown";
       if(started) { last_play=steady_now(); playing_event=*j; }
-      mqtt.publish(topics::SOOTHE,dump(Json{{"id",(*j)["id"]},{"status",started?"started":"rejected"},
-        {"reason","rail_intrusion"},{"started",started},{"why",why},{"ts",wall_now()}}));
+      publish_recorded(topics::SOOTHE,Json{{"id",(*j)["id"]},{"status",started?"started":"rejected"},
+        {"reason","rail_intrusion"},{"started",started},{"why",why},{"ts",wall_now()}});
       return;
     }
     if (!o.fusion || !(topic == topics::RADAR || topic == topics::CRY || topic == topics::ENV)) return;
@@ -464,7 +511,7 @@ int main(int argc, char** argv) {
   });
 
   std::thread cry_th;
-  if (o.cry) cry_th = std::thread([&] { cry_loop(o, mqtt, cry_log.get(), on_cry_event); });
+  if (o.cry) cry_th = std::thread([&] { cry_loop(o, mqtt, cry_log.get(), on_cry_event, history.get()); });
 
   using clock = std::chrono::steady_clock;
   auto next_tick = clock::now() + std::chrono::seconds(1);
@@ -488,12 +535,12 @@ int main(int argc, char** argv) {
 #endif
       }
       if (auto result=voice.completion()) {
-        mqtt.publish(topics::SOOTHE,dump(Json{{"id",pyget(playing_event,"id")},
-          {"status",*result==0?"completed":"failed"},{"exit_code",*result},{"ts",wall_now()}}));
+        publish_recorded(topics::SOOTHE,Json{{"id",pyget(playing_event,"id")},
+          {"status",*result==0?"completed":"failed"},{"exit_code",*result},{"ts",wall_now()}});
       }
       if (o.radar) {
         if (auto m = radar.step(steady_now())) {
-          mqtt.publish(topics::RADAR, dump(*m));
+          publish_recorded(topics::RADAR,*m);
           ++n_radar_out;
           radar_waiting = false;
         } else if (!radar_waiting) {
