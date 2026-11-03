@@ -52,7 +52,7 @@ class HistoryPanel extends StatelessWidget {
               Row(children: [
                 Text('언제 자주 울었을까요?', style: Typo.sans(23, weight: 650)),
                 const Spacer(),
-                Text('${view.records.length}회',
+                Text(view.available ? '${view.totalCount}회' : '—',
                     style: Typo.sans(20, color: Palette.moonDim, tabular: true))
               ]),
               const SizedBox(height: 12),
@@ -65,9 +65,20 @@ class HistoryPanel extends StatelessWidget {
                           painter: _HourlyChart(view.hourly, view.peakBlock)))),
               const SizedBox(height: 9),
               Text(
-                  view.records.isEmpty
-                      ? '울음 기록이 쌓이면 시간대를 보여드려요'
-                      : '${HistoryView.blockLabels[view.peakBlock]}에 가장 자주 울었어요',
+                  view.loading
+                      ? '기록을 불러오는 중이에요'
+                      : view.error != null
+                          ? (view.available
+                              ? '이전 조회 기록 · ${view.error}'
+                              : view.error!)
+                          : view.limitedBySize
+                              ? '저장 공간 제한으로 일부 이전 기록이 정리됐어요'
+                              : view.totalCount == 0
+                                  ? '울음 기록이 쌓이면 시간대를 보여드려요'
+                                  : '${HistoryView.blockLabels[view.peakBlock]}에 가장 자주 울었어요',
+                  key: const ValueKey('history-status'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: Typo.sans(21, weight: 560, color: Palette.breath)),
             ])),
         const SizedBox(height: 16),
@@ -134,7 +145,7 @@ class HistoryPanel extends StatelessWidget {
                       : '${view.temperatureRange}  ·  습도 ${view.humidityRange}',
                   style: Typo.sans(29, weight: 650, color: Palette.breath)),
               const SizedBox(height: 6),
-              Text('10분 이상 울음 미감지 구간 · ${view.quiet.length}개 환경 기록',
+              Text('10분 이상 울음 미감지 구간 · ${view.quietCount}개 환경 기록',
                   style: Typo.sans(16, color: Palette.moonDim)),
               const Spacer(),
               const Divider(height: 16, color: Palette.line),
@@ -148,9 +159,12 @@ class HistoryPanel extends StatelessWidget {
         const SizedBox(height: 132, child: RadioInfoCard()),
       ]);
   String _date(DateTime t) {
-    final now = DateTime.now();
-    final days = DateTime(now.year, now.month, now.day)
-        .difference(DateTime(t.year, t.month, t.day))
+    final rawNow = DateTime.now();
+    final now =
+        view.database ? rawNow.toUtc().add(const Duration(hours: 9)) : rawNow;
+    t = view.database ? t.toUtc().add(const Duration(hours: 9)) : t;
+    final days = DateTime.utc(now.year, now.month, now.day)
+        .difference(DateTime.utc(t.year, t.month, t.day))
         .inDays;
     return '${days == 0 ? '오늘' : days == 1 ? '어제' : '${t.month}/${t.day}'} ${clock(t)}';
   }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(nunifusion VERSION 0.1.0 LANGUAGES CXX)
+project(nunifusion VERSION 0.1.0 LANGUAGES C CXX)
 
 # 숨결지기 atlas 네이티브 서비스(com.atlas.NuniFusion1)
 #
@@ -26,9 +26,12 @@ set(NUNI_TFLITE_LIBS "" CACHE STRING "TFLite 라이브러리(pkg-config 대신 �
 
 find_package(PkgConfig QUIET)
 find_package(Threads REQUIRED)
+include(cmake/SQLite.cmake)
 
-# ── 핵심 로직(외부 의존성 없음) ──────────────────────────────────────────────
+# ── 핵심 로직(SQLite는 고정 소스로 함께 빌드) ──────────────────────────────────────────────
 add_library(nuni_core STATIC
+  src/history_store.cpp
+  src/history_records.cpp
   src/json_util.cpp
   src/sleep_state.cpp
   src/env_control.cpp
@@ -43,7 +46,7 @@ add_library(nuni_core STATIC
   src/audio_wav.cpp
 )
 target_include_directories(nuni_core PUBLIC include third_party)
-target_link_libraries(nuni_core PUBLIC Threads::Threads)
+target_link_libraries(nuni_core PUBLIC Threads::Threads nuni_sqlite)
 target_compile_options(nuni_core PRIVATE -Wall -Wextra)
 
 # ── TFLite (울음 감지) ───────────────────────────────────────────────────────
@@ -191,3 +194,31 @@ foreach(check wired_test usb_serial_test mqtt_keepalive_test humidifier_test)
   add_test(NAME ${check} COMMAND ${check})
 endforeach()
 install(FILES deploy/65-mic-input-gain.conf DESTINATION ${SVC_DIR}/systemd)
+
+add_executable(environment_history_test tests/environment_history_test.cpp)
+target_link_libraries(environment_history_test PRIVATE nuni_core)
+target_compile_options(environment_history_test PRIVATE -UNDEBUG)
+add_test(NAME environment_history_test COMMAND environment_history_test)
+add_executable(environment_history_demo tools/environment_history_demo.cpp)
+target_link_libraries(environment_history_demo PRIVATE nuni_core)
+
+if(NOT CMAKE_CROSSCOMPILING)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME environment_history_mqtt_test COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/environment_history_mqtt_test.py $<TARGET_FILE:nunifusion>)
+    set_tests_properties(environment_history_mqtt_test PROPERTIES TIMEOUT 30)
+  endif()
+endif()
+
+add_executable(history_records_test tests/history_records_test.cpp)
+target_link_libraries(history_records_test PRIVATE nuni_core)
+target_compile_options(history_records_test PRIVATE -UNDEBUG)
+add_test(NAME history_records_test COMMAND history_records_test)
+set_tests_properties(history_records_test PROPERTIES TIMEOUT 60)
+
+# Session-bus replay server has no microphone/AI dependency; useful under SDK QEMU.
+if(HAVE_SDBUS)
+  add_executable(history_dbus_replay tools/history_dbus_replay.cpp src/dbus_service.cpp)
+  target_link_libraries(history_dbus_replay PRIVATE nuni_core SDBusCpp::sdbus-c++)
+endif()

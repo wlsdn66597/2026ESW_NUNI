@@ -26,3 +26,7 @@ Pi 5의 환경 정책은 `control/humidifier/command`를 발행한다. Pi 4는 �
 ## ThinQ
 
 `probe_thinq.py`는 SDK 어댑터의 명령 경로를 실행한다. `THINQ_PAT` 환경변수를 설정하고 `--list`로 계정의 가전 목록을 조회한다. 에어컨·공기청정기 LED 시연은 `thinq_sdk_mock` 모드와 USB 명령 게이트웨이를 사용한다.
+
+## 환경 기록 DB
+
+기록 DB·실제 탭의 빌드·시험·설정과 배포 전 확인 순서는 [DATABASE.md](DATABASE.md)를 참고한다.

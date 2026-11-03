@@ -8,6 +8,7 @@
 //           GetState() → s           마지막 fusion/state JSON
 //           GetSensors() → s         {"radar":…, "cry":…, "env":…} 마지막으로 받은 센서 메시지
 //           GetAlerts() → s          최근 경보 [{"level","reason","ts"}, …] (24시간, 최대 200개)
+//           GetEnvironmentHistory(x from_s, x to_s, u limit) -> s  환경 1분 요약 JSON
 //           GetCryLog() → s          울음 기록 상태(CryLog::snapshot — 지금 울음·힌트·답 없는 울음·최근 울음들)
 //           AnswerCry(s id, s action) → s     "무엇으로 그쳤나요?" 답 → {"ok":true,…} 또는 {"ok":false,"error":…}
 //           AnswerCryNot(s id, s action) → s  "해 봤는데 안 그쳤어요"
@@ -19,6 +20,7 @@
 #pragma once
 
 #include <functional>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -38,6 +40,10 @@ class DbusService {
 
 // 메서드가 부르는 처리 함수(비어 있으면 그 메서드는 {"ok":false} / 빈 값을 돌려준다). D-Bus 스레드에서 불린다.
 struct DbusHandlers {
+  std::function<std::string(int64_t,int64_t,uint32_t)> get_environment_history;
+  std::function<std::string(int64_t,int64_t,uint32_t)> get_history_summary;
+  std::function<std::string(int64_t,int64_t,uint32_t)> get_sensor_history;
+  std::function<std::string(int64_t,int64_t,uint32_t,int64_t)> get_recorded_events;
   std::function<std::string()> get_alerts;
   std::function<std::string()> get_cry_log;
   std::function<std::string(const std::string& id, const std::string& action)> answer_cry;
