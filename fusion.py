@@ -16,20 +16,25 @@ def usable(x):
 def number(x, default=0):
     return x if isinstance(x, (int, float)) and math.isfinite(x) else default
 
+def apnea_alarm(radar):
+    """레이더가 무호흡(낮은 호흡 지속)을 판정했는가. 재실 여부와 무관하다 — 숨이 멈추면
+    레이더가 대상을 놓칠 수 있고, 이탈 여부는 브리지가 ToF로 이미 걸렀다. 진동은 이 판정에만 울린다."""
+    return isinstance(radar, dict) and bool(radar.get("apnea_valid", False)) and bool(radar.get("apnea", False))
+
 def decide(radar, cry, env):
     r, c, e = radar or {}, cry or {}, env or {}
     present = usable(r) and r.get("presence") and r.get("presence_valid", True)
     br = number(r.get("breathing_rate", r.get("breathing_bpm")))
     bv = present and r.get("breath_valid", False) and br > 0
-    apnea = present and r.get("apnea_valid", False) and r.get("apnea", False)
     assessment = r.get("assessment")
-    abnormal = present and (assessment.get("breath_abnormal", False) if isinstance(assessment, dict) else (apnea or (bv and br < 8)))
+    # 낮은 호흡값 하나로는 경보하지 않는다(2026-11-05 결정). 호흡 이상 경보는 무호흡 판정뿐이다.
+    abnormal = apnea_alarm(r)
     motion = present and r.get("movement_valid", False) and (assessment.get("movement_high", False) if isinstance(assessment, dict) else number(r.get("movement")) > .6)
     borderline = bv and (assessment.get("borderline", False) if isinstance(assessment, dict) else (8 <= br <= 15 or br > 55))
     crying = usable(c) and c.get("is_crying") and number(c.get("confidence", c.get("cry_score"))) >= .7
     level, reasons = "normal", []
     if abnormal:
-        level = "alert"; reasons.append("호흡 신호 이상 확인 필요")
+        level = "alert"; reasons.append("무호흡 의심")
     if crying:
         if level != "alert": level = "attention"
         reasons.append(f"울음 감지({c.get('cls')})")
@@ -56,6 +61,7 @@ class Fusion:
     def __init__(self, debounce_n=2, cooldown_s=10, now_fn=time.monotonic):
         self.radar = self.cry = self.env = None
         self.last = self._candidate = "normal"
+        self._last_apnea = False
         self.debounce_n, self.cooldown_s, self._now = debounce_n, cooldown_s, now_fn
         self._since = None
         self._last_alert_key = None; self._last_alert_ts = 0
@@ -87,7 +93,7 @@ class Fusion:
 
     def _process(self):
         sensors=self.current_sensors(); r,c,e=sensors['radar'],sensors['cry'],sensors['env']
-        raw,reasons=decide(r,c,e); now=self._now()
+        raw,reasons=decide(r,c,e); now=self._now(); raw_reasons=reasons
         if raw == 'normal': self._candidate='normal'; self._since=None; level='normal'
         else:
             if self._candidate != raw or self._since is None: self._candidate=raw; self._since=now
@@ -102,10 +108,15 @@ class Fusion:
         store.set_fusion(level,reasons);store.set_sleep_state(ss,why);store.set_personal(state['personal']);store.set_actions(actions)
         bus.publish(topics.FUSION_STATE,state)
         emitted=False; key=(level,'|'.join(reasons))
-        if level != 'normal' and level != self.last and not (key == self._last_alert_key and now-self._last_alert_ts < self.cooldown_s):
+        # 무호흡이 시작되는 순간은 디바운스·쿨다운·현재 단계와 상관없이 한 번 알린다(진동 대상).
+        apnea=apnea_alarm(r); onset=apnea and not self._last_apnea
+        changed=level != 'normal' and level != self.last and not (key == self._last_alert_key and now-self._last_alert_ts < self.cooldown_s)
+        if changed:
             self._last_alert_key=key;self._last_alert_ts=now
-            bus.publish(topics.ALERT,dict(level=level,reason=', '.join(reasons),ts=topics.now()));emitted=True
-        self.last=level
+        if changed or onset:
+            why=raw_reasons if onset and level == 'normal' else reasons
+            bus.publish(topics.ALERT,dict(level='alert' if onset else level,reason=', '.join(why),apnea=apnea,apnea_onset=onset,ts=topics.now()));emitted=True
+        self.last=level; self._last_apnea=apnea
         return level,reasons,emitted
 
     def on_message(self, topic, payload):

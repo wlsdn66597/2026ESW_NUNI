@@ -3,6 +3,7 @@ import '../copy.dart';
 import '../data/care_history.dart';
 import '../data/store.dart';
 import '../theme.dart';
+import 'breath_view.dart';
 import 'common.dart';
 
 class CurrentPanel extends StatelessWidget {
@@ -26,6 +27,7 @@ class CurrentPanel extends StatelessWidget {
     final crying = store.soundAvailable && store.sensors.cry?.isCrying == true;
     final alert = store.link == Link.ok && store.state.level == 'alert';
     final known = store.soundAvailable;
+    final breath = BreathView.of(store);
     final current = store.cry?.current;
     final pending = store.cry?.episode(store.cry?.pending);
     final id = recordId ??
@@ -145,12 +147,10 @@ class CurrentPanel extends StatelessWidget {
                     Expanded(
                         child: _Observation(
                             label: '호흡 수',
-                            value: store.breathObserved
-                                ? '${store.radar!.breathingRate!.round()}'
-                                : '확인 중',
-                            unit: store.breathObserved ? '회/분' : '',
-                            note:
-                                store.breathObserved ? '현재 호흡 신호' : '호흡 신호 대기',
+                            value: breath.value,
+                            unit: breath.unit,
+                            note: breath.note,
+                            color: breath.color,
                             icon: Icons.favorite_border_rounded)),
                     const SizedBox(width: 12),
                     Expanded(
@@ -213,13 +213,10 @@ class CurrentPanel extends StatelessWidget {
             Expanded(
                 child: _Observation(
                     label: '호흡 수',
-                    value: store.breathObserved
-                        ? '${store.radar!.breathingRate!.round()}'
-                        : '확인 중',
-                    unit: store.breathObserved ? '회/분' : '',
-                    note: store.breathObserved
-                        ? '센서가 확인한 현재 호흡'
-                        : '유효한 호흡 신호를 기다려요',
+                    value: breath.value,
+                    unit: breath.unit,
+                    note: breath.note,
+                    color: breath.color,
                     icon: Icons.favorite_border_rounded)),
             const SizedBox(width: 16),
             Expanded(

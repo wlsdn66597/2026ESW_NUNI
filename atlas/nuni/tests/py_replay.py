@@ -73,7 +73,8 @@ def main():
         elif op == "radar_new":
             import radar_bridge
             rb = importlib.reload(radar_bridge)        # 모듈 전역 상태 초기화
-            names = {"apnea_hold_s": "APNEA_HOLD_S", "apnea_require_prior_s": "APNEA_REQUIRE_PRIOR_S",
+            names = {"apnea_hold_s": "APNEA_HOLD_S", "apnea_low_br": "APNEA_LOW_BR",
+                     "apnea_require_prior_s": "APNEA_REQUIRE_PRIOR_S",
                      "stale_s": "STALE_S", "move_window_s": "MOVE_WINDOW_S", "move_scale_cm": "MOVE_SCALE_CM",
                      "br_min": "BR_MIN", "br_max": "BR_MAX", "dist_min_cm": "DIST_MIN_CM",
                      "dist_max_cm": "DIST_MAX_CM", "move_reject": "MOVE_REJECT", "smooth_window_s": "SMOOTH_WINDOW_S"}

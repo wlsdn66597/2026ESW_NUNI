@@ -29,14 +29,11 @@ def classify(radar, cry):
     if not radar or not radar.get("valid", True) or not radar.get("presence"):
         return "unknown", "레이더에서 대상을 확인하지 못함"
 
-    breathing_rate = radar.get("breathing_rate", radar.get("breathing_bpm"))
     # 실물 레이더가 호흡을 못 재는 구간(breath_valid=False)의 0은 '무호흡'이 아니라
     # '미측정'이다. 이때 낮은 호흡수를 이상으로 보면 오탐이 된다.
-    # (breath_valid 없는 합성/기존 데이터는 True로 간주해 기존 동작 유지)
     br_valid = radar.get("breath_valid", False)
-    if radar.get("apnea") or (
-        br_valid and isinstance(breathing_rate, (int, float)) and breathing_rate < 8
-    ):
+    # 낮은 호흡값 하나로는 이상으로 보지 않는다(2026-11-05 결정). 무호흡 판정만 이상으로 본다.
+    if radar.get("apnea"):
         return "hold", "호흡 이상 감지로 수면 판정 보류"
     if not br_valid:
         return "hold", "호흡 신호 미확보로 판정 보류"

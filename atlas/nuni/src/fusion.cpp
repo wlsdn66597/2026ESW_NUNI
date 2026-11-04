@@ -10,18 +10,21 @@ std::string max_level(const std::string& a,const std::string& b){return order(a)
 std::string join(const std::vector<std::string>& v,const char* sep){std::string s;for(const auto& x:v){if(!s.empty())s+=sep;s+=x;}return s;}
 bool usable(const Json& j){return j.is_object() && !j.empty() && truthy(pyget(j,"valid",true));}
 }
+bool apnea_alarm(const Json& radar){
+  return radar.is_object() && truthy(pyget(radar,"apnea_valid",false)) && truthy(pyget(radar,"apnea"));
+}
 Decision decide(const Json& radar,const Json& cry,const Json& env){
   std::string level="normal";std::vector<std::string> reasons;
   const bool present=usable(radar) && truthy(pyget(radar,"presence")) && truthy(pyget(radar,"presence_valid",true));
   const double br=num_or(pyget(radar,"breathing_rate",pyget(radar,"breathing_bpm")),0);
   const bool br_valid=present && truthy(pyget(radar,"breath_valid",false)) && std::isfinite(br) && br>0;
-  const bool apnea=present && truthy(pyget(radar,"apnea_valid",false)) && truthy(pyget(radar,"apnea"));
   const Json assessment=pyget(radar,"assessment");
-  const bool abnormal=present && (assessment.is_object()?truthy(pyget(assessment,"breath_abnormal")):(apnea || (br_valid && br<8)));
+  // 낮은 호흡값 하나로는 경보하지 않는다(2026-11-05 결정). 호흡 이상 경보는 무호흡 판정뿐이다.
+  const bool abnormal=apnea_alarm(radar);
   const bool motion=present && truthy(pyget(radar,"movement_valid",false)) &&
     (assessment.is_object()?truthy(pyget(assessment,"movement_high")):num_or(pyget(radar,"movement"),0)>0.6);
   const bool borderline=br_valid && (assessment.is_object()?truthy(pyget(assessment,"borderline")):((br>=8 && br<=15)||br>55));
-  if(abnormal){level="alert";reasons.emplace_back("호흡 신호 이상 확인 필요");}
+  if(abnormal){level="alert";reasons.emplace_back("무호흡 의심");}
   const bool crying=usable(cry) && truthy(pyget(cry,"is_crying")) && num_or(pyget(cry,"confidence",pyget(cry,"cry_score")),0)>=0.7;
   if(crying){level=max_level(level,"attention");reasons.emplace_back("울음 감지("+py_str(pyget(cry,"cls"))+")");}
   if(crying && (abnormal || motion)){level="alert";reasons.emplace_back("다중 신호 동시 이상");}
@@ -92,10 +95,14 @@ Fusion::Result Fusion::process(){
     {"ts",wall_now()}};
   last_state_=state;publish_(topics::FUSION_STATE,state);
   bool emitted=false;
-  if(level!="normal" && level!=last_ && cooldown_allows(level,reasons)){
-    publish_(topics::ALERT,Json{{"level",level},{"reason",join(reasons,", ")},{"ts",wall_now()}});emitted=true;
+  // 무호흡이 시작되는 순간은 디바운스·쿨다운·현재 단계와 상관없이 한 번 알린다(진동 대상).
+  const bool apnea=apnea_alarm(r);const bool apnea_onset=apnea && !last_apnea_;
+  if((level!="normal" && level!=last_ && cooldown_allows(level,reasons)) || apnea_onset){
+    const auto& why=apnea_onset && level=="normal"?decision.reasons:reasons;
+    publish_(topics::ALERT,Json{{"level",apnea_onset?"alert":level},{"reason",join(why,", ")},
+      {"apnea",apnea},{"apnea_onset",apnea_onset},{"ts",wall_now()}});emitted=true;
   }
-  last_=level;return {level,reasons,emitted};
+  last_=level;last_apnea_=apnea;return {level,reasons,emitted};
 }
 Fusion::Result Fusion::on_message(const std::string& topic,const Json& payload){
   if((topic==topics::RADAR || topic==topics::CRY || topic==topics::ENV) && accept(topic,payload)){

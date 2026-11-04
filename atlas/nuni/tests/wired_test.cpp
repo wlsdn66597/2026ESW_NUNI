@@ -15,12 +15,14 @@ int main(){
   r["presence"]=false;r["movement"]=1;
   assert(decide(r,crying,nullptr).level=="attention");
   r=radar();r["breathing_rate"]=7;
-  assert(decide(r,nullptr,nullptr).level=="alert");
+  assert(decide(r,nullptr,nullptr).level=="normal");  // 낮은 값 하나로는 경보하지 않는다
   r["breath_valid"]=false;r["apnea"]=true;
+  assert(decide(r,nullptr,nullptr).level=="alert");
+  r["presence"]=false;  // 무호흡 카운트 중 레이더가 대상을 놓쳐도 경보는 유지
   assert(decide(r,nullptr,nullptr).level=="alert");
   r["apnea_valid"]=false;
   assert(decide(r,nullptr,nullptr).level=="normal");
-  std::cout<<"PASS missing respiration, independent valid alarm\n";
+  std::cout<<"PASS missing respiration, apnea-only alarm\n";
   r=radar();r["movement"]=0.9;
   assert(decide(r,crying,nullptr).level=="alert");
   assert(single_sensor_decide(r,crying,nullptr).level=="attention");
@@ -60,6 +62,62 @@ int main(){
   const auto stale=*bridge.step(112);
   assert(stale["breath_valid"]==false && stale["apnea"]==false && stale["presence_valid"]==true);
   std::cout<<"PASS partial UART field failure does not refresh respiration\n";
+
+  {
+    RadarBridge b;
+    auto feed=[&](double t,const char* br,const char* presence="ON",const char* dist="40"){
+      b.on_esphome("mr60bha2/presence",presence,t);b.on_esphome("mr60bha2/distance",dist,t);
+      b.on_esphome("mr60bha2/breath_rate",br,t);return *b.step(t);};
+    for(int t=0;t<10;++t)feed(t,"18");
+    assert(feed(10,"18")["breath_valid"]==true);
+    for(int t=11;t<=17;++t){  // 실측과 같은 7초 하락: 경과 시간은 보내되 무호흡은 아니다
+      auto m=feed(t,"3");
+      assert(m["breath_valid"]==false && m["apnea"]==false && m["low_breath_s"].get<double>()==t-11);
+      assert(m["assessment"]["level"]=="normal");
+    }
+    auto back=feed(18,"18");
+    assert(back["low_breath_s"].is_null() && back["breath_valid"]==true);
+    for(int t=19;t<=24;++t)assert(feed(t,"7")["breath_valid"]==true);  // 6~60은 받아들인다
+    for(int t=25;t<30;++t)feed(t,"18");
+    for(int t=30;t<50;++t)assert(feed(t,"2")["apnea"]==false);
+    auto apnea=feed(50,"0");
+    assert(apnea["apnea"]==true && apnea["assessment"]["level"]=="alert");
+    std::cout<<"PASS low breath must last 20s; 7s module dip does not alarm\n";
+  }
+  {
+    RadarBridge b;  // 카운트 중 대상이 사라져도 ToF 변화가 없으면 계속 센다
+    auto feed=[&](double t,const char* br,const char* presence="ON",const char* dist="40"){
+      b.on_esphome("mr60bha2/presence",presence,t);b.on_esphome("mr60bha2/distance",dist,t);
+      b.on_esphome("mr60bha2/breath_rate",br,t);return *b.step(t);};
+    for(int t=0;t<10;++t){b.on_tof(700,t);feed(t,"18");}
+    for(int t=10;t<15;++t){b.on_tof(700,t);feed(t,"3");}
+    for(int t=15;t<30;++t){b.on_tof(705,t);feed(t,"0","OFF","0");}
+    auto lost=feed(30,"0","OFF","0");
+    assert(lost["presence"]==false && lost["apnea"]==true);
+    b.on_tof(400,31);  // 난간 ToF가 크게 바뀜 = 안아 올림 → 이탈로 보고 멈춘다
+    auto left=feed(31,"0","OFF","0");
+    assert(left["apnea"]==false && left["low_breath_s"].is_null());
+
+    RadarBridge u;  // ToF를 모르면(무효) 계속 센다
+    auto feed_u=[&](double t,const char* br,const char* presence="ON",const char* dist="40"){
+      u.on_esphome("mr60bha2/presence",presence,t);u.on_esphome("mr60bha2/distance",dist,t);
+      u.on_esphome("mr60bha2/breath_rate",br,t);return *u.step(t);};
+    for(int t=0;t<10;++t)feed_u(t,"18");
+    feed_u(10,"1");  // 대상이 보일 때 카운트가 시작된다
+    for(int t=11;t<30;++t){u.on_tof(std::nullopt,t);feed_u(t,"1","OFF","0");}
+    assert(feed_u(30,"1","OFF","0")["apnea"]==true);
+    std::cout<<"PASS apnea count keeps going on target loss unless rail ToF changes\n";
+  }
+  {
+    double now=200;std::vector<Json> alerts;
+    Fusion g([&](const auto& topic,const auto& p){if(topic==topics::ALERT)alerts.push_back(p);},2,10,[&]{return now;});
+    auto a=radar();a["apnea"]=true;a["breath_valid"]=false;
+    g.on_message(topics::RADAR,a);  // 디바운스 전이라도 무호흡 시작은 바로 알린다
+    assert(alerts.size()==1 && alerts[0]["apnea_onset"]==true && alerts[0]["level"]=="alert");
+    now=203;a["seq"]=2;g.on_message(topics::RADAR,a);
+    assert(alerts.size()==2 && alerts[1]["apnea_onset"]==false);  // 단계 전환 경보는 진동 대상이 아니다
+    std::cout<<"PASS apnea onset alert is immediate and marked for vibration\n";
+  }
 
   TofWatch w;
   auto tof=[](int distance,bool valid=true){return Json{{"distance_mm",distance},{"valid",valid}};};

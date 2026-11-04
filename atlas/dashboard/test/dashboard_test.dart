@@ -134,6 +134,33 @@ void main() {
     store.dispose();
   });
 
+  testWidgets('low breath shows elapsed seconds, then apnea alarm',
+      (tester) async {
+    tester.view.physicalSize = const Size(1920, 1080);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final now = DateTime.now().millisecondsSinceEpoch / 1000;
+    _Store make(Radar radar) => _Store()
+      ..link = Link.ok
+      ..cry = const CryLogView()
+      ..sensors = Sensors(radar: radar, cry: CrySound(ts: now));
+    for (final (radar, shown, hidden) in [
+      (Radar(presence: true, lowBreathS: 4.2, ts: now), '다시 확인 중', '무호흡 의심'),
+      (Radar(presence: true, lowBreathS: 12.7, ts: now), '약하게 잡힘', '다시 확인 중'),
+      (Radar(presence: false, apnea: true, lowBreathS: 21, ts: now), '무호흡 의심', '감지 안 됨'),
+    ]) {
+      final store = make(radar);
+      await tester.pumpWidget(NuniApp(store: store));
+      await loadPenguin(tester);
+      expect(find.text(shown), findsWidgets);
+      expect(find.text(hidden), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      store.dispose();
+    }
+  });
+
   testWidgets('missing radar keeps live sound and room visible',
       (tester) async {
     tester.view.physicalSize = const Size(1920, 1080);

@@ -2,6 +2,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import '../data/store.dart';
 import '../theme.dart';
+import 'breath_view.dart';
 import 'common.dart';
 
 /// 호흡·울음 관측. 전파 근거는 화면 오른쪽 아래에 표시한다.
@@ -11,6 +12,7 @@ class Vitals extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final br = store.breathObserved ? store.radar?.breathingRate : null;
+    final view = BreathView.of(store);
     final sound = store.soundAvailable;
     final crying = sound && store.sensors.cry!.isCrying;
     final hist = store.breathHistory
@@ -24,10 +26,11 @@ class Vitals extends StatelessWidget {
               child: _Reading(
                   icon: Icons.favorite_border_rounded,
                   label: '호흡',
-                  value: br == null ? '확인 중' : '${br.round()}',
-                  unit: br == null ? null : '회/분',
-                  number: br != null,
-                  note: br == null ? '호흡 신호를 기다려요' : '센서가 확인한 현재 호흡수',
+                  value: view.value,
+                  unit: view.unit.isEmpty ? null : view.unit,
+                  number: view.number,
+                  color: view.color,
+                  note: view.note,
                   extra: br != null && hist.length >= 2
                       ? Column(
                           crossAxisAlignment: CrossAxisAlignment.start,

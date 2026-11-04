@@ -21,6 +21,8 @@ class Radar {
     this.distance,
     this.ts = 0,
     this.sampleId,
+    this.lowBreathS,
+    this.apneaHoldS = 20,
   });
 
   final double? breathingRate; // 회/분
@@ -31,6 +33,8 @@ class Radar {
   final double? distance; // cm
   final double ts;
   final String? sampleId;
+  final double? lowBreathS; // 원본 호흡값이 5회/분 이하로 이어진 시간(초). 아니면 null
+  final double apneaHoldS; // 이 시간 이상 이어지면 무호흡
 
   factory Radar.fromJson(Map<String, dynamic> j) => Radar(
         breathingRate: _num(j['breathing_rate'] ?? j['breathing_bpm']),
@@ -41,6 +45,8 @@ class Radar {
         distance: _num(j['distance']),
         ts: _num(j['ts']) ?? 0,
         sampleId: j['sample_id']?.toString(),
+        lowBreathS: _num(j['low_breath_s']),
+        apneaHoldS: _num(j['apnea_hold_s']) ?? 20,
       );
 }
 

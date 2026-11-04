@@ -90,6 +90,7 @@ int main() {
         if (k.contains(key)) dst = k[key].get<double>();
       };
       num("apnea_hold_s", cfg.apnea_hold_s);
+      num("apnea_low_br", cfg.apnea_low_br);
       num("apnea_require_prior_s", cfg.apnea_require_prior_s);
       num("stale_s", cfg.stale_s);
       num("move_window_s", cfg.move_window_s);

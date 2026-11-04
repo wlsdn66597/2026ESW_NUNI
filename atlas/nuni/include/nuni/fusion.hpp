@@ -24,6 +24,10 @@ struct Decision {
 // 판단 규칙(상태 없음). radar·cry·env는 마지막 메시지(없으면 null).
 Decision decide(const Json& radar, const Json& cry, const Json& env);
 
+// 레이더가 무호흡(낮은 호흡 지속)을 판정했는가. 재실 여부와 무관하다 — 숨이 멈추면 레이더가
+// 대상을 놓칠 수 있고, 이탈 여부는 브리지가 ToF로 이미 걸렀다. 진동은 이 판정에만 울린다.
+bool apnea_alarm(const Json& radar);
+
 // 비교용: 개별 신호 하나만으로 경보(오탐이 많음).
 Decision single_sensor_decide(const Json& radar, const Json& cry, const Json& env);
 
@@ -61,6 +65,7 @@ class Fusion {
   NowFn now_;
   Json radar_, cry_, env_;
   std::string last_ = "normal";
+  bool last_apnea_ = false;
   int debounce_n_;
   double cooldown_s_;
   std::string candidate_ = "normal";

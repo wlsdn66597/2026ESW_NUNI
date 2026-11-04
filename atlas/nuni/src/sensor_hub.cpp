@@ -57,6 +57,9 @@ bool SensorHub::on_line(const std::string& channel,const std::string& line,doubl
     }
     else {
       last_tof_=data; tof_at_=measured_at;
+      // 무호흡 카운트 중 이탈(안아 올림·일어남) 판단용. 무효 측정은 '모름'으로 넘긴다.
+      const auto tof_mm=as_number(pyget(data,"distance_mm"));
+      radar_.on_tof(truthy(pyget(data,"valid")) ? tof_mm : std::nullopt, measured_at);
       if(auto ev=tof_.on_tof(data,measured_at)) {
         publish_(topics::TOF_EVENT,Json{{"v",1},{"boot_id",boot_},{"id",boot_+":"+std::to_string(++event_seq_)},
           {"event","rail_intrusion"},{"uptime_ms",static_cast<long long>((now-start_)*1000)},

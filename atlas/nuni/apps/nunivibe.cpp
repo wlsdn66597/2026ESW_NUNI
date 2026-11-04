@@ -1,6 +1,7 @@
 // nunivibe — 파이 4 진동 노드. 파이 5 브로커의 경보를 받아 GPIO로 진동 모듈을 켠다.
 //
-//   fusion/alert    {"level": "alert" | "attention", ...}  → 경보 패턴(길게 3번) / 주의 패턴(짧게 1번)
+//   fusion/alert    {"apnea_onset": true, ...}  → 경보 패턴(길게 3번). 무호흡이 시작될 때만 울린다.
+//                   그 밖의 경보(울음·CO₂·온도·다중 신호)는 진동하지 않는다.
 //   control/vibrate {"pattern": "alert" | "attention" | "test"}  → 손으로 시험할 때
 //
 // GPIO는 atlas PeripheralManager1(D-Bus)로 다룬다: EnablePeripheral("GPIO_n") → ActiveType=0(ACTIVE_HIGH) → Open(1=OUT)
@@ -239,7 +240,8 @@ int main(int argc, char** argv) {
     if(mqtt.message_retained()) return;
     auto j = parse_payload(raw);
     if (!j || !j->is_object()) return;
-    if (topic == topics::ALERT) vib.play(j->value("level", ""));
+    // 진동은 무호흡이 시작될 때만 울린다(2026-11-05 결정). 울음·CO₂·온도 경보는 화면에만 표시한다.
+    if (topic == topics::ALERT) { if (truthy(pyget(*j, "apnea_onset", false))) vib.play("alert"); }
     else if (topic == topics::VIBRATE) vib.play(j->value("pattern", ""));
   });
   std::cerr << "[vibe] 시작: " << pin << (dry ? " (dry)" : "") << ", MQTT " << host << ":" << port << "\n";
