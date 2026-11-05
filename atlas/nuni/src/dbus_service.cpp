@@ -39,12 +39,6 @@ class SdbusService : public DbusService {
                   return h_.get_history_summary ? h_.get_history_summary(from,to,limit)
                     : dump(Json{{"ok",false},{"error","history unavailable"}});
                 }),
-            sdbus::registerMethod("GetSensorHistory")
-                .withInputParamNames("from_s", "to_s", "limit").withOutputParamNames("history_json")
-                .implementedAs([this](int64_t from,int64_t to,uint32_t limit) {
-                  return h_.get_sensor_history ? h_.get_sensor_history(from,to,limit)
-                    : dump(Json{{"ok",false},{"error","history unavailable"}});
-                }),
             sdbus::registerMethod("GetRecordedEvents")
                 .withInputParamNames("from_s", "to_s", "limit", "after_id").withOutputParamNames("events_json")
                 .implementedAs([this](int64_t from,int64_t to,uint32_t limit,int64_t after) {

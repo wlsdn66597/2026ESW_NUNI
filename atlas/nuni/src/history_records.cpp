@@ -2,9 +2,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <stdexcept>
 namespace nuni {
 namespace {
@@ -21,85 +23,57 @@ struct Stmt {
 };
 void sql(sqlite3* db,const char* text){char* err=nullptr;if(sqlite3_exec(db,text,nullptr,nullptr,&err)!=SQLITE_OK){std::string reason=err?err:sqlite3_errmsg(db);sqlite3_free(err);throw std::runtime_error(reason);}}
 bool number(const Json& j,const char* key,double& out){if(!j.contains(key)||!j[key].is_number())return false;out=j[key].get<double>();return std::isfinite(out);}
-bool yes(const Json& j,const char* key){return j.contains(key)&&j[key].is_boolean()&&j[key].get<bool>();}
 std::string text(const Json& j,const char* key){return j.contains(key)&&j[key].is_string()?j[key].get<std::string>():"";}
 bool time_value(const Json& j,const char* key,double& x){return number(j,key,x)&&x>=0&&x<253402300799.0;}
-void metric(Json& j,const std::string& key,double value){
-  if(!j.contains(key))j[key]=Json{{"count",0},{"sum",0.0},{"min",value},{"max",value}};
-  auto& m=j[key];m["count"]=m["count"].get<int64_t>()+1;m["sum"]=m["sum"].get<double>()+value;
-  m["min"]=std::min(m["min"].get<double>(),value);m["max"]=std::max(m["max"].get<double>(),value);
-}
-void increment(Json& j,const char* key,int n=1){j[key]=j.value(key,int64_t(0))+n;}
-Json combine(Json a,const Json& b){
-  if(!a.is_object())a=Json::object();
-  for(auto it=b.begin();it!=b.end();++it){
-    if(it.value().is_object()){
-      if(!a.contains(it.key()))a[it.key()]=it.value();
-      else {auto& dst=a[it.key()];const auto& src=it.value();dst["count"]=dst["count"].get<int64_t>()+src["count"].get<int64_t>();
-        dst["sum"]=dst["sum"].get<double>()+src["sum"].get<double>();
-        dst["min"]=std::min(dst["min"].get<double>(),src["min"].get<double>());dst["max"]=std::max(dst["max"].get<double>(),src["max"].get<double>());}
-    }else a[it.key()]=a.value(it.key(),int64_t(0))+it.value().get<int64_t>();
-  }
-  return a;
-}
 bool valid_action(const std::string& a){for(const char* x:{"feed","diaper","hold","sleep","burp","temp","self","sick","other","unknown"})if(a==x)return true;return false;}
+// Stable across builds and restarts (unlike std::hash), so dedup keys survive upgrades.
+std::string digest(const std::string& s){
+  uint64_t h=1469598103934665603ULL;
+  for(unsigned char c:s){h^=c;h*=1099511628211ULL;}
+  char out[17];std::snprintf(out,sizeof(out),"%016llx",static_cast<unsigned long long>(h));return out;
 }
-HistoryRecords::HistoryRecords(sqlite3* db):db_(db){
+// Published every 1-2 s; only a change of state is worth keeping.
+const std::set<std::string> kPeriodic{"control/action","control/humidifier/command","control/humidifier/state",
+  "control/humidifier/policy"};
+// Fields that differ on every publication even when nothing changed.
+const char* const kVolatile[]{"id","ts","seq","boot_id","issued_at","expires_at","command_id","sample_id",
+  "uptime_ms","relay_seq"};
+bool has_column(sqlite3* db,const char* table,const char* column){
+  const std::string q=std::string("PRAGMA table_info(")+table+")";Stmt s(db,q.c_str());
+  while(s.row())if(s.str(1)==column)return true;
+  return false;
+}
+}
+HistoryRecords::HistoryRecords(sqlite3* db,int bucket_s):db_(db),bucket_s_(bucket_s){
   receipt_nonce_=std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
   sql(db_,R"SQL(
 CREATE TABLE IF NOT EXISTS history_metadata(key TEXT PRIMARY KEY,value REAL NOT NULL);
-INSERT OR IGNORE INTO history_metadata VALUES('recorded_events_pruned_until',-1),('sensor_minutes_pruned_until',-1),
- ('environment_minutes_pruned_until',-1),('quiet_environment_pruned_until',-1),('cry_episodes_pruned_until',-1);
-CREATE TABLE IF NOT EXISTS sensor_minutes(topic TEXT NOT NULL,minute_s INTEGER NOT NULL,stats TEXT NOT NULL,PRIMARY KEY(topic,minute_s));
-CREATE INDEX IF NOT EXISTS sensor_minutes_time ON sensor_minutes(minute_s);
-CREATE TABLE IF NOT EXISTS history_sources(source TEXT PRIMARY KEY,sequence INTEGER NOT NULL,seen_s REAL NOT NULL);
+INSERT OR IGNORE INTO history_metadata VALUES('recorded_events_pruned_until',-1),
+ ('environment_buckets_pruned_until',-1),('cry_episodes_pruned_until',-1);
 CREATE TABLE IF NOT EXISTS recorded_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT NOT NULL UNIQUE,topic TEXT NOT NULL,payload TEXT NOT NULL,received_s REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS recorded_events_time ON recorded_events(received_s,id);
 CREATE TABLE IF NOT EXISTS cry_episodes(id TEXT PRIMARY KEY,t0 REAL,t1 REAL,action TEXT,answered_at REAL NOT NULL DEFAULT 0,dropped INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS cry_episodes_time ON cry_episodes(t0);
-CREATE TABLE IF NOT EXISTS quiet_environment(minute_s INTEGER PRIMARY KEY,stats TEXT NOT NULL);
+DROP TABLE IF EXISTS sensor_minutes;
+DROP TABLE IF EXISTS quiet_environment;
+DROP TABLE IF EXISTS history_sources;
+DELETE FROM history_metadata WHERE key IN ('sensor_minutes_pruned_until','quiet_environment_pruned_until','environment_minutes_pruned_until');
 )SQL");
-  Stmt load(db_,"SELECT source,sequence,seen_s FROM history_sources");
-  while(load.row())sources_[load.str(0)]={sqlite3_column_int64(load.p,1),sqlite3_column_double(load.p,2)};
-}
-bool HistoryRecords::fresh(const std::string& topic,const Json& j,double at){
-  std::string source;int64_t seq=-1;
-  // Radar sample_id describes the underlying breath, not the whole 1 Hz observation.
-  // Its publication seq is needed to preserve presence/apnea transitions as well.
-  if(j.contains("seq")&&j["seq"].is_number_integer()&&!text(j,"boot_id").empty()){
-    source=topic+":"+text(j,"boot_id");seq=j["seq"].get<int64_t>();
-  }else{double ts;if(!time_value(j,"ts",ts))return false;source=topic+":legacy";seq=static_cast<int64_t>(ts*1000);}
-  if(source.size()>200||seq<0)return false;
-  auto found=sources_.find(source);
-  if(found!=sources_.end()&&seq<=found->second.first)return false;
-  if(found==sources_.end()&&sources_.size()>=4096)throw std::runtime_error("history source limit reached");
-  sources_[source]={seq,at};return true;
+  // Room state when the cry started (NULL when no fresh reading was available).
+  for(const char* column:{"room_temp","room_humidity","room_co2"})
+    if(!has_column(db_,"cry_episodes",column)){
+      const std::string q=std::string("ALTER TABLE cry_episodes ADD COLUMN ")+column+" REAL";sql(db_,q.c_str());
+    }
 }
 void HistoryRecords::ingest(const std::string& topic,const Json& j,double at){
-  if(topic=="sensor/radar"||topic=="audio/cry"){
-    if(!fresh(topic,j,at))return;
-    const int64_t minute=static_cast<int64_t>(at)/60*60;
-    if(!minutes_.count({topic,minute})&&minutes_.size()>=2880)throw std::runtime_error("pending sensor minute limit reached");
-    auto& stats=minutes_[{topic,minute}];if(!stats.is_object())stats=Json::object();increment(stats,"sample_count");
-    double ts;
-    bool valid=(!j.contains("valid")||yes(j,"valid")) &&
-      (text(j,"source")=="pi4-usb"||(time_value(j,"ts",ts)&&at-ts>=-2&&at-ts<=5));
-    if(topic=="audio/cry"){
-      double score;valid=valid&&j.contains("is_crying")&&j["is_crying"].is_boolean()&&number(j,"confidence",score)&&score>=0&&score<=1;
-      if(valid){increment(stats,"valid_count");metric(stats,"confidence",score);if(yes(j,"is_crying"))increment(stats,"crying_count");}
-      const bool continuous=last_audio_>=0&&at>=last_audio_&&at-last_audio_<=5;
-      if(!valid||yes(j,"is_crying")){quiet_start_=-1;audio_quiet_=false;}
-      else{if(!continuous||!audio_quiet_)quiet_start_=at;audio_quiet_=true;}
-      last_audio_=at;
-    }else if(valid){
-      increment(stats,"valid_count");if(yes(j,"presence"))increment(stats,"presence_count");
-      if(yes(j,"apnea"))increment(stats,"apnea_count");
-      double v;if(yes(j,"presence")&&yes(j,"breath_valid")&&number(j,"breathing_rate",v)&&v>0&&v<=200)metric(stats,"breathing_rate",v);
-      if(number(j,"movement",v)&&v>=0&&v<=1)metric(stats,"movement",v);
-    }
-    return;
-  }
   if(topic.rfind("cry/",0)!=0&&topic!="fusion/alert"&&topic!="event/tof"&&topic.rfind("control/",0)!=0)return;
+  if(kPeriodic.count(topic)){
+    Json state=j;for(const char* key:kVolatile)state.erase(key);
+    auto signature=state.dump();
+    auto& last=last_state_[topic];
+    if(last==signature)return;
+    last=std::move(signature);
+  }
   // Canonical key order makes a local event and its MQTT echo idempotent.
   const std::string payload=nlohmann::json::parse(j.dump()).dump();
   if(payload.size()>32768)throw std::runtime_error("history event exceeds 32 KiB");
@@ -107,23 +81,18 @@ void HistoryRecords::ingest(const std::string& topic,const Json& j,double at){
   const bool identified=!text(j,"id").empty()||!text(j,"event_id").empty()||!text(j,"command_id").empty()||
     time_value(j,"ts",stamp)||time_value(j,"t0",stamp)||time_value(j,"t1",stamp)||
     (!text(j,"boot_id").empty()&&j.contains("seq")&&j["seq"].is_number_integer());
-  const auto key=identified ? topic+":"+payload : "receipt:"+receipt_nonce_+":"+std::to_string(++receipt_seq_);
+  const auto key=identified ? topic+":"+digest(payload) : "receipt:"+receipt_nonce_+":"+std::to_string(++receipt_seq_);
   if(!events_.count(key)&&events_.size()>=4096)throw std::runtime_error("pending event limit reached");
   events_.emplace(key,Event{topic,payload,at});
   if(topic=="cry/episode"||topic=="cry/feedback")episode(j,at);
 }
 void HistoryRecords::environment(const Json& j,double at){
-  double age=0;number(j,"age_s",age);
-  if(!audio_quiet_||quiet_start_<0||at<last_audio_||at-last_audio_>5||at-age-quiet_start_<600)return;
-  const int64_t minute=static_cast<int64_t>(at)/60*60;
-  if(!quiet_.count(minute)&&quiet_.size()>=1440)throw std::runtime_error("pending quiet minute limit reached");
-  auto& stats=quiet_[minute];if(!stats.is_object())stats=Json::object();
-  for(const char* name:{"temp","humidity","co2"})metric(stats,name,j[name].get<double>());
+  double t,h,c;
+  if(number(j,"temp",t)&&number(j,"humidity",h)&&number(j,"co2",c))room_=Room{t,h,c,at};
 }
 void HistoryRecords::episode(const Json& event,double at){
   const auto id=text(event,"id"),kind=text(event,"event");
   if(id.empty()||id.size()>160)return;
-  if(kind=="start"){quiet_start_=-1;audio_quiet_=false;}
   if(kind!="start"&&kind!="end"&&kind!="drop"&&kind!="answer")return;
   double start,end;
   if(kind=="start"||kind=="end"||kind=="drop") {
@@ -132,17 +101,23 @@ void HistoryRecords::episode(const Json& event,double at){
   }
   if(!episodes_.count(id)){
     if(episodes_.size()>=10080)throw std::runtime_error("pending episode limit reached");
-    Stmt load(db_,"SELECT t0,t1,action,answered_at,dropped FROM cry_episodes WHERE id=?");load.text(1,id);
-    Json row{{"t0",nullptr},{"t1",nullptr},{"action",nullptr},{"answered_at",0.0},{"dropped",false}};
+    Stmt load(db_,"SELECT t0,t1,action,answered_at,dropped,room_temp,room_humidity,room_co2 FROM cry_episodes WHERE id=?");load.text(1,id);
+    Json row{{"t0",nullptr},{"t1",nullptr},{"action",nullptr},{"answered_at",0.0},{"dropped",false},{"room",nullptr}};
     if(load.row()){
       if(sqlite3_column_type(load.p,0)!=SQLITE_NULL)row["t0"]=sqlite3_column_double(load.p,0);
       if(sqlite3_column_type(load.p,1)!=SQLITE_NULL)row["t1"]=sqlite3_column_double(load.p,1);
       if(sqlite3_column_type(load.p,2)!=SQLITE_NULL)row["action"]=load.str(2);
       row["answered_at"]=sqlite3_column_double(load.p,3);row["dropped"]=sqlite3_column_int(load.p,4)!=0;
+      if(sqlite3_column_type(load.p,5)!=SQLITE_NULL)
+        row["room"]=Json{{"temp",sqlite3_column_double(load.p,5)},{"humidity",sqlite3_column_double(load.p,6)},
+                         {"co2",sqlite3_column_double(load.p,7)}};
     }
     episodes_[id]=std::move(row);
   }
   auto& row=episodes_[id];double x;
+  // Room state at the start of the cry: the latest reading, if it is at most 2 minutes old.
+  if(kind=="start"&&row["room"].is_null()&&room_.at>=0&&std::fabs(at-room_.at)<=120)
+    row["room"]=Json{{"temp",room_.temp},{"humidity",room_.humidity},{"co2",room_.co2}};
   if(time_value(event,"t0",x)&&row["t0"].is_null())row["t0"]=x;
   if(kind=="end"&&time_value(event,"t1",x)&&(!row["t0"].is_number()||x>=row["t0"].get<double>())){
     if(row["t1"].is_null()||x>=row["t1"].get<double>())row["t1"]=x;
@@ -159,48 +134,35 @@ void HistoryRecords::episode(const Json& event,double at){
   }
 }
 void HistoryRecords::write(double cutoff){
-  for(const auto& [key,value]:minutes_){
-    if(key.second<cutoff)continue;
-    Stmt previous(db_,"SELECT stats FROM sensor_minutes WHERE topic=? AND minute_s=?");previous.text(1,key.first);previous.integer(2,key.second);
-    Json combined=previous.row()?combine(Json::parse(previous.str(0)),value):value;
-    Stmt save(db_,"INSERT INTO sensor_minutes VALUES(?,?,?) ON CONFLICT(topic,minute_s) DO UPDATE SET stats=excluded.stats");
-    save.text(1,key.first);save.integer(2,key.second);save.text(3,combined.dump());save.done();
-  }
-  for(const auto& [minute,value]:quiet_){
-    if(minute<cutoff)continue;
-    Stmt previous(db_,"SELECT stats FROM quiet_environment WHERE minute_s=?");previous.integer(1,minute);
-    Json combined=previous.row()?combine(Json::parse(previous.str(0)),value):value;
-    Stmt save(db_,"INSERT INTO quiet_environment VALUES(?,?) ON CONFLICT(minute_s) DO UPDATE SET stats=excluded.stats");
-    save.integer(1,minute);save.text(2,combined.dump());save.done();
-  }
   for(const auto& [id,row]:episodes_){
     if(row["t0"].is_number()&&row["t0"].get<double>()<cutoff)continue;
-    Stmt save(db_,"INSERT INTO cry_episodes VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET t0=excluded.t0,t1=excluded.t1,action=excluded.action,answered_at=excluded.answered_at,dropped=excluded.dropped");
+    Stmt save(db_,"INSERT INTO cry_episodes(id,t0,t1,action,answered_at,dropped,room_temp,room_humidity,room_co2) VALUES(?,?,?,?,?,?,?,?,?) "
+      "ON CONFLICT(id) DO UPDATE SET t0=excluded.t0,t1=excluded.t1,action=excluded.action,answered_at=excluded.answered_at,"
+      "dropped=excluded.dropped,room_temp=excluded.room_temp,room_humidity=excluded.room_humidity,room_co2=excluded.room_co2");
     save.text(1,id);if(row["t0"].is_number())save.num(2,row["t0"].get<double>());
     if(row["t1"].is_number())save.num(3,row["t1"].get<double>());
     if(row["action"].is_string())save.text(4,row["action"].get<std::string>());
-    save.num(5,row["answered_at"].get<double>());save.integer(6,row["dropped"].get<bool>());save.done();
+    save.num(5,row["answered_at"].get<double>());save.integer(6,row["dropped"].get<bool>());
+    if(row["room"].is_object()){
+      save.num(7,row["room"]["temp"].get<double>());save.num(8,row["room"]["humidity"].get<double>());
+      save.num(9,row["room"]["co2"].get<double>());
+    }
+    save.done();
   }
   written_events_.clear();
   for(const auto& [key,event]:events_){
-    if(written_events_.size()>=16)break;
+    if(written_events_.size()>=64)break;
     written_events_.push_back(key);
     if(event.at<cutoff)continue;
     Stmt save(db_,"INSERT OR IGNORE INTO recorded_events(event_key,topic,payload,received_s) VALUES(?,?,?,?)");
     save.text(1,key);save.text(2,event.topic);save.text(3,event.payload);save.num(4,event.at);save.done();
   }
-  for(auto it=sources_.begin();it!=sources_.end();){
-    if(it->second.second<cutoff){it=sources_.erase(it);continue;}
-    Stmt save(db_,"INSERT INTO history_sources VALUES(?,?,?) ON CONFLICT(source) DO UPDATE SET sequence=excluded.sequence,seen_s=excluded.seen_s");
-    save.text(1,it->first);save.integer(2,it->second.first);save.num(3,it->second.second);save.done();++it;
-  }
-  for(const char* query:{"DELETE FROM sensor_minutes WHERE minute_s<?","DELETE FROM quiet_environment WHERE minute_s<?",
-      "DELETE FROM recorded_events WHERE received_s<?","DELETE FROM cry_episodes WHERE coalesce(t0,answered_at)<?","DELETE FROM history_sources WHERE seen_s<?"}){
+  for(const char* query:{"DELETE FROM recorded_events WHERE received_s<?","DELETE FROM cry_episodes WHERE coalesce(t0,answered_at)<?"}){
     Stmt prune(db_,query);prune.num(1,cutoff);prune.done();
   }
 }
-void HistoryRecords::committed(){minutes_.clear();quiet_.clear();episodes_.clear();for(const auto& key:written_events_)events_.erase(key);written_events_.clear();}
-bool HistoryRecords::dirty()const{return !minutes_.empty()||!quiet_.empty()||!episodes_.empty()||!events_.empty();}
+void HistoryRecords::committed(){episodes_.clear();for(const auto& key:written_events_)events_.erase(key);written_events_.clear();}
+bool HistoryRecords::dirty()const{return !episodes_.empty()||!events_.empty();}
 bool HistoryRecords::has_events()const{return !events_.empty()||!episodes_.empty();}
 Json HistoryRecords::summary(int64_t from,int64_t to,uint32_t limit){
   Json hourly=Json::array();for(int i=0;i<24;++i)hourly.push_back(0);
@@ -208,33 +170,32 @@ Json HistoryRecords::summary(int64_t from,int64_t to,uint32_t limit){
   std::string counts="SELECT (CAST(t0 AS INTEGER)/3600+9)%24,count(*) FROM cry_episodes WHERE "+std::string(filter)+" GROUP BY 1";
   Stmt count(db_,counts.c_str());count.integer(1,from);count.integer(2,to);int64_t total=0;
   while(count.row()){const auto n=sqlite3_column_int64(count.p,1);hourly[sqlite3_column_int(count.p,0)]=n;total+=n;}
-  std::string query="SELECT id,t0,t1,action FROM cry_episodes WHERE "+std::string(filter)+" ORDER BY t0 DESC,id LIMIT ?";
+  std::string query="SELECT id,t0,t1,action,room_temp,room_humidity,room_co2 FROM cry_episodes WHERE "+std::string(filter)+" ORDER BY t0 DESC,id LIMIT ?";
   Stmt rows(db_,query.c_str());rows.integer(1,from);rows.integer(2,to);rows.integer(3,limit);
   Json episodes=Json::array();
-  while(rows.row())episodes.push_back(Json{{"id",rows.str(0)},{"t0",sqlite3_column_double(rows.p,1)},
-    {"t1",sqlite3_column_double(rows.p,2)},{"action",sqlite3_column_type(rows.p,3)==SQLITE_NULL?Json(nullptr):Json(rows.str(3))}});
-  Stmt quiet(db_,"SELECT stats FROM quiet_environment WHERE minute_s>=? AND minute_s<? ORDER BY minute_s");quiet.integer(1,from);quiet.integer(2,to);
-  Json range=Json::object();int n=0;
-  while(quiet.row()){range=combine(std::move(range),Json::parse(quiet.str(0)));++n;}
-  Json quiet_result{{"count",n},{"temperature_c",nullptr},{"humidity_pct",nullptr},{"co2_ppm",nullptr}};
-  if(n>=3)for(const auto& pair:{std::make_pair("temp","temperature_c"),std::make_pair("humidity","humidity_pct"),std::make_pair("co2","co2_ppm")}){
-    const auto& m=range[pair.first];quiet_result[pair.second]=Json{{"min",m["min"]},{"max",m["max"]}};
+  while(rows.row()){
+    Json room=nullptr;
+    if(sqlite3_column_type(rows.p,4)!=SQLITE_NULL)
+      room=Json{{"temp",sqlite3_column_double(rows.p,4)},{"humidity",sqlite3_column_double(rows.p,5)},{"co2",sqlite3_column_double(rows.p,6)}};
+    episodes.push_back(Json{{"id",rows.str(0)},{"t0",sqlite3_column_double(rows.p,1)},
+      {"t1",sqlite3_column_double(rows.p,2)},{"action",sqlite3_column_type(rows.p,3)==SQLITE_NULL?Json(nullptr):Json(rows.str(3))},
+      {"room",room}});
+  }
+  // Calm-room baseline: summaries where the radar saw the baby most of the time and no cry overlapped.
+  Stmt calm(db_,"SELECT min(temp_min),max(temp_max),min(humidity_min),max(humidity_max),min(co2_min),max(co2_max),count(*) "
+    "FROM environment_buckets e WHERE bucket_s>=? AND bucket_s<? AND valid_count>0 AND radar_count>0 AND presence_count*2>=radar_count "
+    "AND NOT EXISTS(SELECT 1 FROM cry_episodes c WHERE c.dropped=0 AND c.t0<e.bucket_s+? AND coalesce(c.t1,c.t0)>=e.bucket_s)");
+  calm.integer(1,from);calm.integer(2,to);calm.integer(3,bucket_s_);calm.row();
+  const int n=sqlite3_column_int(calm.p,6);
+  Json quiet_result{{"count",n},{"bucket_seconds",bucket_s_},{"temperature_c",nullptr},{"humidity_pct",nullptr},{"co2_ppm",nullptr}};
+  if(n>=3){
+    int i=0;
+    for(const char* name:{"temperature_c","humidity_pct","co2_ppm"}){
+      quiet_result[name]=Json{{"min",sqlite3_column_double(calm.p,i)},{"max",sqlite3_column_double(calm.p,i+1)}};i+=2;
+    }
   }
   return Json{{"ok",true},{"time_unit","unix_seconds"},{"timezone","Asia/Seoul"},{"from_s",from},{"to_s",to},
-    {"limited_by_size",limited("cry_episodes",from)||limited("quiet_environment",from)},{"total_count",total},{"hourly",hourly},{"episodes",episodes},{"truncated",total>static_cast<int64_t>(episodes.size())},{"quiet",quiet_result}};
-}
-Json HistoryRecords::sensors(int64_t from,int64_t to,uint32_t limit){
-  // Page whole minutes, never split radar and audio rows at the same timestamp.
-  Stmt s(db_,"SELECT topic,minute_s,stats FROM sensor_minutes WHERE minute_s IN (SELECT DISTINCT minute_s FROM sensor_minutes WHERE minute_s>=? AND minute_s<? ORDER BY minute_s LIMIT ?) ORDER BY minute_s,topic");
-  s.integer(1,from);s.integer(2,to);s.integer(3,int64_t(limit)+1);Json rows=Json::array();
-  int64_t last=-1;uint32_t minutes=0;bool truncated=false;
-  while(s.row()){
-    const auto minute=sqlite3_column_int64(s.p,1);
-    if(minute!=last){if(minutes==limit){truncated=true;break;}++minutes;last=minute;}
-    rows.push_back(Json{{"topic",s.str(0)},{"minute_s",minute},{"stats",Json::parse(s.str(2))}});
-  }
-  return Json{{"ok",true},{"time_unit","unix_seconds"},{"limit_unit","minutes"},{"records",rows},
-    {"truncated",truncated},{"next_from_s",truncated?last+60:to},{"limited_by_size",limited("sensor_minutes",from)}};
+    {"limited_by_size",limited("cry_episodes",from)||limited("environment_buckets",from)},{"total_count",total},{"hourly",hourly},{"episodes",episodes},{"truncated",total>static_cast<int64_t>(episodes.size())},{"quiet",quiet_result}};
 }
 Json HistoryRecords::events(int64_t from,int64_t to,uint32_t limit,int64_t after){
   Stmt s(db_,"SELECT id,topic,payload,received_s FROM recorded_events WHERE received_s>=? AND received_s<? AND id>? ORDER BY id LIMIT ?");
@@ -275,11 +236,9 @@ void HistoryRecords::make_room(bool force){
   {Stmt max(db_,"PRAGMA max_page_count");max.row();cap=sqlite3_column_int64(max.p,0);}
   if(!force&&used()<cap*8/10)return;
   struct Table {const char* name;const char* key;const char* time;};
-  // Raw control heartbeats can be large: evict these first, protecting summaries
-  // and parent answers until lower-priority data is exhausted.
-  for(const auto& table:{Table{"recorded_events","id","received_s"},Table{"sensor_minutes","rowid","minute_s"},
-      Table{"environment_minutes","minute_s","minute_s"},Table{"quiet_environment","minute_s","minute_s"},
-      Table{"cry_episodes","id","coalesce(t0,answered_at)"}}){
+  // Evict raw events first, protecting room summaries and parent answers until events are exhausted.
+  for(const auto& table:{Table{"recorded_events","id","received_s"},
+      Table{"environment_buckets","bucket_s","bucket_s"},Table{"cry_episodes","id","coalesce(t0,answered_at)"}}){
     for(int pass=0;pass<64&&used()>=cap*65/100;++pass){
       const auto where=std::string(table.key)+" IN (SELECT "+table.key+" FROM "+table.name+" ORDER BY "+table.time+
         " LIMIT max(1,(SELECT count(*)/5 FROM "+table.name+")))";

@@ -22,7 +22,6 @@ int main(int argc,char** argv){
     nuni::DbusHandlers h;
     h.get_environment_history=[&](int64_t from,int64_t to,uint32_t limit){return history.query(from,to,limit).dump();};
     h.get_history_summary=[&](int64_t from,int64_t to,uint32_t limit){return history.summary(from,to,limit).dump();};
-    h.get_sensor_history=[&](int64_t from,int64_t to,uint32_t limit){return history.sensor_history(from,to,limit).dump();};
     h.get_recorded_events=[&](int64_t from,int64_t to,uint32_t limit,int64_t after){return history.events(from,to,limit,after).dump();};
     auto service=nuni::make_dbus_service(false,std::move(h));
     if(!service)throw std::runtime_error("cannot start session D-Bus service");

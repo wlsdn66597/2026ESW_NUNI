@@ -114,6 +114,8 @@ struct Options {
   std::string history_db = env_str("NUNI_HISTORY_DB", "/data/nuni/nuni.db");
   int history_days = static_cast<int>(env_num("NUNI_HISTORY_DAYS", 30));
   int history_mib = static_cast<int>(env_num("NUNI_HISTORY_MAX_MIB", 64));
+  int history_bucket = static_cast<int>(env_num("NUNI_HISTORY_ENV_BUCKET_S", 3600));  // 방 상태 요약 단위(1시간·2시간)
+  int history_flush = static_cast<int>(env_num("NUNI_HISTORY_FLUSH_S", 30));          // 모아서 저장하는 간격
   bool crylog = env_on("NUNI_ENABLE_CRYLOG", true);
   std::string cry_dir = env_str("NUNI_CRY_DIR", "/data/nuni/cry");
   std::string cry_ctx = env_str("NUNI_CRY_CTX", exe_dir() + "/cry_personal_ctx.json");
@@ -142,6 +144,7 @@ void usage(const char* argv0) {
             << "  NUNI_PULSE_SERVER, NUNI_PULSE_SOURCE,\n"
             << "  환경 DB: NUNI_ENABLE_HISTORY(1), NUNI_HISTORY_DB(/data/nuni/nuni.db),\n"
             << "  NUNI_HISTORY_DAYS(30; 7..365), NUNI_HISTORY_MAX_MIB(64; 4..1024),\n"
+            << "  NUNI_HISTORY_ENV_BUCKET_S(3600; 3600|7200 방 상태 요약 단위), NUNI_HISTORY_FLUSH_S(30; 1..600),\n"
             << "  울음 기록: NUNI_ENABLE_CRYLOG(1), NUNI_CRY_DIR(/data/nuni/cry), NUNI_CRY_CTX, NUNI_CRY_RECORD(1),\n"
             << "  NUNI_CRY_END_GAP(8초), NUNI_CRY_MIN_WINDOWS(3),\n"
             << "  NUNI_FUSION_CRY_THRESHOLD, 레이더 게이팅 값(NUNI_BR_MIN 등, radar_bridge.py와 같음)\n"
@@ -294,8 +297,7 @@ void cry_loop(const Options& o, MqttClient& mqtt, CryLog* cry_log, const CryEven
     if (!msg) continue;
     (*msg)["boot_id"]=audio_boot_id;
     (*msg)["seq"]=n+1;
-    if(history) history->record(topics::CRY,*msg,ts);
-    mqtt.publish(topics::CRY, dump(*msg));
+    mqtt.publish(topics::CRY, dump(*msg));  // 1초 판정은 DB에 남기지 않는다(울음 구간은 cry/*로 기록)
     if (cry_log) {
       const auto sec = resample_linear(ring.last(1.0), o.mic_sr);  // 겹치지 않는 지난 1초(녹음용)
       for (const auto& ev : cry_log->tick(ts, detail.cry_score, detail.embedding, sec)) on_cry_event(ev);
@@ -331,6 +333,7 @@ int main(int argc, char** argv) {
     try {
       HistoryStore::Config config;
       config.path=o.history_db; config.retention_days=o.history_days; config.max_mib=o.history_mib;
+      config.bucket_s=o.history_bucket; config.flush_s=o.history_flush;
       history=std::make_unique<HistoryStore>(config);
       const auto imported=history->import_cry_log(o.cry_dir+"/cry_log.json");
       std::cerr << "[history] cry JSON import: " << dump(imported) << "\n";
@@ -379,9 +382,6 @@ int main(int argc, char** argv) {
     DbusHandlers h;
     h.get_history_summary = [&](int64_t from,int64_t to,uint32_t limit) {
       return dump(history ? history->summary(from,to,limit) : Json{{"ok",false},{"error","history unavailable"}});
-    };
-    h.get_sensor_history = [&](int64_t from,int64_t to,uint32_t limit) {
-      return dump(history ? history->sensor_history(from,to,limit) : Json{{"ok",false},{"error","history unavailable"}});
     };
     h.get_recorded_events = [&](int64_t from,int64_t to,uint32_t limit,int64_t after) {
       return dump(history ? history->events(from,to,limit,after) : Json{{"ok",false},{"error","history unavailable"}});
@@ -448,7 +448,7 @@ int main(int argc, char** argv) {
   if (o.fusion)
     for (const char* t : {topics::RADAR, topics::CRY, topics::ENV}) mqtt.subscribe(t);
 
-  if (history) for(const char* topic:{topics::ENV,topics::RADAR,topics::CRY,"cry/#",topics::ALERT,topics::TOF_EVENT,"control/#"})
+  if (history) for(const char* topic:{topics::ENV,topics::RADAR,"cry/#",topics::ALERT,topics::TOF_EVENT,"control/#"})
     mqtt.subscribe(topic);
 
   // Pi 4 has already processed ToF. Pi 5 receives only fresh entry events.

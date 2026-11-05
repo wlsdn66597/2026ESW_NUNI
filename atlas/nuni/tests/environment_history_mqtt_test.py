@@ -95,11 +95,12 @@ def main():
                 service.send_signal(signal.SIGTERM)
                 assert service.wait(timeout=10) == 0
                 with sqlite3.connect(db_path) as db:
-                    # Sum across minute boundaries so the test is stable at xx:xx:59.
-                    row = db.execute("SELECT sum(total_count),sum(valid_count),sum(temp_sum),min(temp_min),max(temp_max) FROM environment_minutes").fetchone()
-                assert row == (3,3,72.0,23.0,25.0), row
+                    # Sum across bucket boundaries so the test is stable at xx:59:59.
+                    row = db.execute("SELECT sum(total_count),sum(valid_count),sum(temp_sum),min(temp_min),max(temp_max),sum(radar_count),sum(presence_count) FROM environment_buckets").fetchone()
+                assert row == (3,3,72.0,23.0,25.0,1,1), row
                 with sqlite3.connect(db_path) as db:
-                    assert db.execute("SELECT count(*) FROM sensor_minutes").fetchone()[0] == 2
+                    # Radar/microphone per-minute statistics are no longer kept.
+                    assert db.execute("SELECT count(*) FROM sqlite_master WHERE name='sensor_minutes'").fetchone()[0] == 0
                     assert db.execute("SELECT action FROM cry_episodes WHERE id='mqtt-cry'").fetchone()[0] == 'feed'
                     assert db.execute("SELECT count(*) FROM recorded_events").fetchone()[0] == 5
             except BaseException:

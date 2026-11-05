@@ -4,13 +4,15 @@
 
 ## 구현 상태
 
-- 환경·레이더·울음의 1분 요약을 Pi 5용 SQLite DB에 저장한다.
-- 울음/후보/보호자 답, 경보, 난간 감지, 제어 사건의 JSON을 저장한다.
-- 최근 7일 시간대별 울음 횟수, 최근 돌봄 기록, 연속 10분 이상 울음 미감지 환경 범위를 DB에서 계산한다.
+- 방 상태(온도·습도·CO₂)는 **1시간(설정 시 2시간) 단위 요약**만 저장한다. 같은 시간에 레이더가 아기를 본 비율도 센다.
+- 울음 기록(시작·끝·보호자 답 = 무엇으로 그쳤는지)과 **울음이 시작될 때의 방 상태**를 저장한다.
+- 경보·난간 감지·부모 목소리·진동·가전 켜짐/꺼짐 같은 사건은 **상태가 바뀔 때만** 저장한다. 1~2초마다 반복되는 제어 메시지(control/action, 가습기 명령·상태)는 내용이 바뀐 순간만 남긴다.
+- 레이더·마이크의 1분 통계와 1초 울음 판정은 저장하지 않는다(2026-11-05 결정, 용량·SD 쓰기 감소).
+- 최근 7일 시간대별 울음 횟수, 최근 돌봄 기록, 아기가 있고 울지 않은 시간의 방 상태 범위를 DB에서 계산한다.
 - Flutter 실제 탭은 D-Bus `GetHistorySummary`만 읽는다. 최근 40개 울음이나 앱 실행 시간에 의존해 통계를 만들지 않는다.
 - 실제 기기의 기본 탭은 '실제'다. '예시'는 별도 합성 화면이며 저장·학습에 섞지 않는다.
 - 기존 `cry_log.json`을 유지하면서 최근 보관 기간의 완료된 울음을 DB에 복사한다.
-- 기존 환경 DB(user_version=1)를 지우지 않고 user_version=2로 업그레이드한다.
+- 기존 DB(user_version=1·2)를 지우지 않고 user_version=3으로 업그레이드한다. 분 단위 환경 요약은 시간 단위로 합쳐 옮기고, sensor_minutes·quiet_environment 표는 지운다.
 
 **미완료:** 실제 Pi에서의 수집·마이크·D-Bus 정책·재부팅·장기 용량 확인. 이번 작업은 실제 장치에 배포하지 않았다.
 SQLite 정적 링크는 SDK에 없는 sqlite3 개발 라이브러리 문제를 해결한다. 기존 오디오·AI 런타임은 여전히 atlas 장치에 필요하다.
@@ -18,7 +20,7 @@ SQLite 정적 링크는 SDK에 없는 sqlite3 개발 라이브러리 문제를 �
 ## 데이터 흐름
 
 ```text
-sensor/env, sensor/radar, audio/cry, cry/*, fusion/alert, event/tof, control/*
+sensor/env, sensor/radar(재실 비율만), cry/*, fusion/alert, event/tof, control/*
                         ↓
            nunifusion의 HistoryStore 작업 스레드
                         ↓
@@ -37,32 +39,34 @@ Pi 4 등 외부 발행자의 메시지는 브로커를 통해 실제 수신한 �
 
 | 입력 | 테이블/내용 |
 |---|---|
-| sensor/env | environment_minutes: 유효 고유 측정의 온도·습도·CO₂ 합·최솟값·최댓값, 전체/유효 수 |
-| sensor/radar | sensor_minutes: 수신/유효 수, 재실·무호흡 수, 유효 호흡수·움직임 통계 |
-| audio/cry | sensor_minutes: 관측/유효 수, 울음 판정 수, 점수 통계 |
-| cry/*, fusion/alert, event/tof, control/* | recorded_events: 토픽·JSON·Pi 5 수신 시각·저장 ID |
-| 울음 시작·종료·drop·보호자 답 | cry_episodes: 같은 울음 ID의 상태와 최종 답 |
-| 연속 10분 이상 조용했던 유효 환경 측정 | quiet_environment: 분별 실제 온도·습도·CO₂ 범위 |
+| sensor/env | environment_buckets: 1시간(또는 2시간)마다 유효 고유 측정의 온도·습도·CO₂ 합·최솟값·최댓값, 전체/유효 수 |
+| sensor/radar | environment_buckets: 같은 시간의 레이더 발행 수(radar_count)와 재실 수(presence_count)만 |
+| audio/cry | 저장하지 않음(울음 구간은 cry/*로 기록) |
+| cry/*, fusion/alert, event/tof, control/* | recorded_events: 토픽·JSON·Pi 5 수신 시각·저장 ID. 반복 제어 토픽은 상태가 바뀔 때만 |
+| 울음 시작·종료·drop·보호자 답 | cry_episodes: 같은 울음 ID의 상태와 최종 답, 시작 때 방 상태(room_temp·room_humidity·room_co2) |
 
-- 시간 단위는 모두 **Unix 초**. 분 시작은 60초로 내림한다. API 범위는 `[from_s, to_s)`다.
+- 시간 단위는 모두 **Unix 초**. 방 상태 요약 시작은 버킷 길이(3600/7200초)로 내림한다. API 범위는 `[from_s, to_s)`다.
+- 울음 시작 때 방 상태는 2분 이내의 가장 최근 유효 측정을 붙인다. 없으면 null이다.
+- 반복 제어 토픽(control/action, control/humidifier/command·state·policy)은 id·ts·seq·만료 시각 같은 매번 바뀌는 필드를 뺀 내용이 바뀔 때만 사건으로 남긴다.
+- 사건의 중복 판별 키는 내용 전체 대신 `토픽:FNV-1a 64비트 해시`다.
 - 환경은 ESP `sample_id`를 우선해 같은 측정의 반복 발행을 제외한다. 없으면 boot_id/seq, 그다음 ts를 사용한다.
-- 레이더는 재실·무호흡 변화를 보존하기 위해 허브의 1Hz 발행 seq를 기준으로 한다. 호흡수는 presence와 breath_valid가 모두 참일 때만 통계에 넣는다.
-- 레이더·울음도 boot_id/seq 또는 ts로 중복·역순을 제외한다. 울음 감지기의 boot_id는 실행마다 달라진다.
+- 레이더는 허브의 boot_id/seq로 같은 발행을 한 번만 센다. presence_valid가 참인 발행만 radar_count에 넣는다.
 - 잘못된 숫자, invalid, 오래된 표본, retained 메시지를 정상 관측으로 세지 않는다.
 - Pi 4 USB 데이터는 두 Pi의 시각 차이를 고려해 Pi 5 수신 시각과 age_s를 사용한다.
-- 환경 total_count는 고유 측정 수이고, 레이더·울음 sample_count는 수신한 고유 발행 수다. 어느 쪽도 무조건 '관측 초 수'는 아니다.
-- 기록이 없던 분은 0으로 만들지 않는다. 유효 환경 측정이 없는 분의 통계는 null이다.
+- 기록이 없던 시간은 0으로 만들지 않는다. 유효 환경 측정이 없는 시간의 통계는 null이다.
 - 울음 횟수는 완료된 울음 구간 수다. 60초 동안 운 것을 60회로 세지 않고, drop된 짧은 잡음도 제외한다.
 - 답이 먼저 도착해도 종료 사건과 같은 ID로 연결한다. 예전 답이 늦게 들어와 최신 답을 덮어쓰지 않게 answered_at을 비교한다.
 - 사건의 키 순서는 정규화한다. ID/시각/boot+seq가 있는 같은 내용은 중복 제거한다. 식별 정보가 전혀 없는 동일 내용은 각각의 수신 사건으로 보존한다.
 
 ## 울음 없던 환경의 의미
 
-새롭고 유효한 `audio/cry`가 연속해서 is_crying=false일 때만 조용한 시간을 늘린다.
-관측 간격이 5초를 넘거나, 유효하지 않거나, 울음이 감지되거나, 서비스가 재시작되면 연속 시간을 다시 시작한다.
-환경 측정의 age_s를 뺀 시점에도 10분이 지나 있어야 조용한 환경으로 집계한다.
-서로 다른 분의 해당 기록이 3개 이상일 때 실제 최솟값·최댓값 범위를 제공한다.
-마이크 연결이 끊긴 시간을 조용했던 시간으로 간주하지 않는다.
+조회할 때 environment_buckets에서 계산한다(따로 저장하지 않음). 다음을 모두 만족하는 시간만 쓴다.
+
+- 유효 환경 측정이 있다.
+- 레이더 발행이 있고, 그중 절반 이상에서 아기가 보였다(아기가 없는 낮 시간 제외).
+- 그 시간과 겹치는 울음 구간(drop 제외)이 없다.
+
+이런 시간이 3개 이상일 때 실제 최솟값·최댓값 범위를 제공한다(`quiet.count`는 시간 수, `quiet.bucket_seconds`는 버킷 길이).
 이는 관측 기록이며 울음 원인이나 의학적 효과를 판단하는 기능이 아니다.
 
 ## 기존 기록과 복구
@@ -82,19 +86,20 @@ Flutter의 과거 care-history.json은 미전송 선택을 보존하는 로컬 �
 | NUNI_HISTORY_DB | /data/nuni/nuni.db | 영구 데이터 경로 |
 | NUNI_HISTORY_DAYS | 30 | 7~365일 |
 | NUNI_HISTORY_MAX_MIB | 64 | DB 본체 상한, 4~1024 MiB |
+| NUNI_HISTORY_ENV_BUCKET_S | 3600 | 방 상태 요약 단위, 3600(1시간) 또는 7200(2시간). 바꾸면 기존 요약을 새 단위로 합친다 |
+| NUNI_HISTORY_FLUSH_S | 30 | 모아서 저장하는 간격, 1~600초 |
 
 64 MiB·30일은 초기 기본값이다. 최종 운영값은 실제 `/data` 여유 공간과 하루 증가량으로 확정해야 한다.
 DB 초기화 실패 시 로그를 남기고 기존 센서 서비스는 계속 실행하며, 조회는 오류를 반환한다.
 대기열 초과로 버린 입력 수는 조회의 dropped_samples에서 확인한다.
 
-일반 표본은 작업 스레드가 처리하며 환경만 들어올 때는 분 경계에 저장한다.
-레이더·울음·사건이 들어오면 약 1초 단위로 함께 저장하고, 조회·정상 종료 시에는 남은 자료를 저장한다.
-WAL/FULL 동기화를 사용하지만 강제 종료·전원 차단 직전 아직 대기 중인 자료는 잃을 수 있다.
+일반 표본은 작업 스레드가 처리하며 NUNI_HISTORY_FLUSH_S(기본 30초)마다 한 번에 모아 저장한다. 조회·정상 종료 시에도 남은 자료를 저장한다.
+WAL/NORMAL 동기화를 사용한다. DB가 깨지지는 않지만 전원 차단 시 마지막 저장 이후(최대 약 30초) 자료는 잃을 수 있다. 체크포인트는 자동에 맡긴다.
 사건 폭주는 작은 트랜잭션으로 나눠 저장한다. DB 잠김·쓰기 오류는 로그와 조회 오류로 드러나며 재시도한다.
-대기열 4096개, 분별 집계와 소스 체크포인트에도 메모리 한도가 있으므로 장기 디스크 장애에서 완전 무손실을 보장하지 않는다.
+대기열 4096개, 시간별 집계와 소스 체크포인트에도 메모리 한도가 있으므로 장기 디스크 장애에서 완전 무손실을 보장하지 않는다.
 
 보관 기간보다 용량 상한에 먼저 도달하면 큰 원본 사건 로그부터 오래된 부분을 정리한다.
-이후 필요하면 레이더/울음 요약, 환경, 조용한 환경, 보호자 답 순으로 정리해 통계를 최대한 보호한다.
+이후 필요하면 방 상태 요약, 보호자 답 순으로 정리해 통계를 최대한 보호한다.
 해당 조회 범위의 자료가 용량 때문에 정리됐다면 limited_by_size=true를 반환한다.
 실제 탭 통계가 영향을 받으면 사용자에게 일부 이전 기록이 정리됐음을 표시한다.
 따라서 '최근 7일'은 조회 기간이며, 공간 부족으로 삭제된 기록까지 복구해 완전한 7일을 보장한다는 뜻은 아니다.
@@ -109,8 +114,7 @@ WAL/SHM와 기존 JSON·WAV·임베딩은 DB 본체 상한에 포함되지 않�
 | 메서드 | 입력 서명 | 내용 |
 |---|---|---|
 | GetHistorySummary | xxu | 시작·종료·최근 울음 목록 최대 개수 |
-| GetEnvironmentHistory | xxu | 시작·종료·최대 분 수 |
-| GetSensorHistory | xxu | 시작·종료·최대 분 수 |
+| GetEnvironmentHistory | xxu | 시작·종료·최대 요약 개수 |
 | GetRecordedEvents | xxux | 시작·종료·최대 사건 수·이전 after_id |
 
 `x`는 int64, `u`는 uint32. events limit은 1~1000, 나머지는 1~10080.
@@ -121,18 +125,15 @@ Flutter는 최근 7일과 목록 limit=1000을 요청한다. hourly/total_count�
 Summary 예:
 
 ```json
-{"ok":true,"time_unit":"unix_seconds","timezone":"Asia/Seoul","total_count":61,"hourly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,60,1,0,0,0,0],"episodes":[{"id":"example","t0":1793460000,"t1":1793460090,"action":"feed"}],"truncated":true,"quiet":{"count":3,"temperature_c":{"min":22.1,"max":24.4},"humidity_pct":{"min":46,"max":53},"co2_ppm":{"min":500,"max":700}},"limited_by_size":false}
+{"ok":true,"time_unit":"unix_seconds","timezone":"Asia/Seoul","total_count":61,"hourly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,60,1,0,0,0,0],"episodes":[{"id":"example","t0":1793460000,"t1":1793460090,"action":"feed","room":{"temp":23.1,"humidity":34,"co2":820}}],"truncated":true,"quiet":{"count":3,"bucket_seconds":3600,"temperature_c":{"min":22.1,"max":24.4},"humidity_pct":{"min":46,"max":53},"co2_ppm":{"min":500,"max":700}},"limited_by_size":false}
 ```
 
-Environment 결과는 records에 minute_s,total_count,valid_count와 temperature_c/humidity_pct/co2_ppm의 mean/min/max를 담는다.
-Sensor 결과는 records에 topic,minute_s,stats를 담는다. stats 안의 수치 지표는 count/sum/min/max이므로 평균은 sum/count다.
-Sensor의 limit은 분 수다. 같은 분의 두 토픽을 나누지 않으며, truncated이면 next_from_s부터 다시 요청한다.
+Environment 결과는 bucket_seconds와 records(bucket_s,total_count,valid_count, temperature_c/humidity_pct/co2_ppm의 mean/min/max, radar_count, presence_ratio)를 담는다. 다음 페이지는 마지막 bucket_s+bucket_seconds부터 요청한다.
 Events 결과는 records에 id,topic,payload,received_s를 담는다. 저장 ID 순서이며 after_id로 다음 페이지를 요청한다.
-Environment의 다음 페이지는 마지막 minute_s+60부터 요청한다.
 
 ## Flutter 동작
 
-DbusStore가 GetHistorySummary를 주기적으로 조회하고, HistoryView가 결과를 검증해 표시한다.
+DbusStore가 GetHistorySummary를 1분마다, 그리고 새 울음 사건(CryEpisode 신호)이나 보호자 답 직후에 조회하고, HistoryView가 결과를 검증해 표시한다.
 로드 중·실패·정상적인 빈 결과를 구분한다. 처음 실패했을 때 0회라고 단정하거나 합성 기록으로 채우지 않는다.
 이전 조회 후 연결이 끊기면 이전 자료임을 표시하고 복구 후 새 결과로 바꾼다.
 앱이 닫혀도 기록은 서비스에서 계속 쌓인다.
@@ -176,7 +177,7 @@ python3 atlas/nuni/tools/prepare_qemu_runtime.py
 ~/atlas/dev.sh "cd /app/nuni && dbus-run-session -- python3 atlas/nuni/tests/history_dbus_test.py --server /app/nuni/build/atlas/history_dbus_replay --sysroot /opt/atlas-sdk-x86_64/sysroots/armv8a-atlas-linux --extra-libs /app/nuni/build/qemu-runtime/usr/lib/aarch64-linux-gnu"
 ```
 
-Summary·Environment·Sensor·Events의 실제 입력/반환 서명, 페이지 커서, 잘못된 범위 처리를 확인한다.
+Summary·Environment·Events의 실제 입력/반환 서명, 페이지 커서, 잘못된 범위 처리를 확인한다.
 
 ## 실기기 배포 전 확인 순서
 
@@ -188,7 +189,7 @@ Summary·Environment·Sensor·Events의 실제 입력/반환 서명, 페이지 �
 6. 서비스를 시작하고 `[history]`와 JSON import 로그를 확인한다. DB는 `/data`에 두므로 데이터 저장을 위해 루트를 rw로 바꿀 필요가 없다.
 7. ARC/기존 팀 배포 절차로 새 대시보드 IPK를 설치한다. 새 앱·새 서비스를 함께 확인한다.
 8. 실제 센서·울음 종료·보호자 답을 입력하고 실제 탭과 DB가 일치하는지 확인한다.
-9. 앱만 꺼도 수집이 계속되는지, 마이크를 끊었을 때 조용한 시간이 늘지 않는지 확인한다.
+9. 앱만 꺼도 수집이 계속되는지, 아기가 없을 때(레이더 재실 없음) 평소 방 상태 범위에 들어가지 않는지 확인한다.
 10. 서비스 재시작과 Pi 재부팅 후 자료 보존·자동 실행을 확인하고, 하루 증가량과 삭제 정책을 점검한다.
 
 원본 JSON은 기존 학습·돌봄 기능을 위해 유지한다. 원본 기록 삭제나 실제 장치 배포는 이번 PC 작업에서 수행하지 않았다.

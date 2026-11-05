@@ -37,7 +37,7 @@ class DbusStore extends NuniStore {
   late final _obj =
       DBusRemoteObject(_client, name: _name, path: DBusObjectPath(_path));
   final _subs = <StreamSubscription>[];
-  Timer? _fast, _slow;
+  Timer? _fast, _slow, _history;
   DateTime _lastStateSignal = DateTime.fromMillisecondsSinceEpoch(0);
   bool _slowBusy = false;
 
@@ -48,11 +48,18 @@ class DbusStore extends NuniStore {
       _applyState(s.values.first.asString());
     }));
     _subs.add(_signal('Alert').listen((s) => _pollSlow()));
-    _subs.add(_signal('CryEpisode').listen((s) => _pollSlow()));
+    _subs.add(_signal('CryEpisode').listen((s) {
+      _pollSlow();
+      refreshHistory(); // 새 울음 기록은 바로 반영
+    }));
     _fast = Timer.periodic(const Duration(seconds: 1), (_) => _pollFast());
     _slow = Timer.periodic(const Duration(seconds: 4), (_) => _pollSlow());
+    // 7일치 기록은 1분마다면 충분하다(조회할 때마다 서비스가 모아 둔 기록을 저장하므로 자주 부르지 않는다)
+    _history =
+        Timer.periodic(const Duration(minutes: 1), (_) => refreshHistory());
     _pollFast();
     _pollSlow();
+    refreshHistory();
   }
 
   Stream<DBusSignal> _signal(String name) =>
@@ -106,7 +113,6 @@ class DbusStore extends NuniStore {
     } catch (_) {
       // 연결 상태는 _pollFast가 정한다
     } finally {
-      await refreshHistory();
       _slowBusy = false;
     }
   }
@@ -167,6 +173,7 @@ class DbusStore extends NuniStore {
       if (r['ok'] == true) {
         showNotice(okText);
         await _pollSlow();
+        await refreshHistory(); // 부모 답이 기록 화면에 바로 보이게
         return null;
       }
       final err = r['error'] as String? ?? '기록하지 못했어요';
@@ -200,6 +207,7 @@ class DbusStore extends NuniStore {
     }
     _fast?.cancel();
     _slow?.cancel();
+    _history?.cancel();
     _client.close();
     super.dispose();
   }

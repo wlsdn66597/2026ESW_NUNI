@@ -16,7 +16,7 @@ def main():
     parser.add_argument('--extra-libs', default='')
     args = parser.parse_args()
     assert os.environ.get('DBUS_SESSION_BUS_ADDRESS'), 'run under dbus-run-session'
-    base = int(time.time()) // 60 * 60
+    base = int(time.time()) // 3600 * 3600  # hour aligned: room state is kept per hour
     with tempfile.TemporaryDirectory(prefix='nuni-dbus-') as directory:
         root = Path(directory)
         rows = []
@@ -25,7 +25,6 @@ def main():
         for seq, temp in [(1,23),(2,25)]:
             add('sensor/env', dict(sample_id=f'esp:{seq}',source='pi4-usb',valid=True,age_s=0,temp=temp,humidity=45,co2=650),seq)
         add('sensor/radar',dict(boot_id='radar',seq=1,source='pi4-usb',valid=True,presence=True,breath_valid=True,breathing_rate=30,movement=0.2),2)
-        add('audio/cry',dict(boot_id='mic',seq=1,ts=base+2,is_crying=False,confidence=0.1),2)
         for identifier, offset in [('first',3),('second',4)]:
             add('cry/episode',dict(id=identifier,event='end',t0=base+offset,t1=base+offset+1),offset+1)
         add('cry/feedback',dict(id='first',event='answer',action='feed',ts=base+5),5)
@@ -56,8 +55,7 @@ def main():
                 assert sum(summary['hourly']) == 2 and summary['timezone'] == 'Asia/Seoul'
                 env = call('GetEnvironmentHistory','xxu',base,base+60,1000)
                 assert env['records'][0]['temperature_c']['mean'] == 24
-                sensors = call('GetSensorHistory','xxu',base,base+60,1000)
-                assert len(sensors['records']) == 2
+                assert env['bucket_seconds'] == 3600 and env['records'][0]['presence_ratio'] == 1
                 events = call('GetRecordedEvents','xxux',base,base+60,2,0)
                 assert len(events['records']) == 2 and events['truncated']
                 rest = call('GetRecordedEvents','xxux',base,base+60,1000,events['after_id'])

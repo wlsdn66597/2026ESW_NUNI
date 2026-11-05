@@ -145,7 +145,7 @@ class HistoryPanel extends StatelessWidget {
                       : '${view.temperatureRange}  ·  습도 ${view.humidityRange}',
                   style: Typo.sans(29, weight: 650, color: Palette.breath)),
               const SizedBox(height: 6),
-              Text('10분 이상 울음 미감지 구간 · ${view.quietCount}개 환경 기록',
+              Text('아기가 있고 울지 않은 시간 기준 · 기록 ${view.quietCount}개',
                   style: Typo.sans(16, color: Palette.moonDim)),
               const Spacer(),
               const Divider(height: 16, color: Palette.line),

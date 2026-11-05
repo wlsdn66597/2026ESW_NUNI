@@ -17,6 +17,7 @@
 namespace nuni {
 namespace {
 constexpr int64_t kMaxTime = 253402300799LL;
+constexpr int kSchemaVersion = 3;
 struct Statement {
   sqlite3_stmt* p = nullptr;
   Statement(sqlite3* db, const char* sql) {
@@ -39,6 +40,19 @@ void exec(sqlite3* db, const std::string& sql) {
     throw std::runtime_error(reason);
   }
 }
+bool table_exists(sqlite3* db, const char* name) {
+  Statement s(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?");
+  s.text(1, name);
+  return sqlite3_step(s.p) == SQLITE_ROW;
+}
+std::string bucket_table(const char* name) {
+  return std::string("CREATE TABLE IF NOT EXISTS ") + name + R"SQL((
+ bucket_s INTEGER PRIMARY KEY, total_count INTEGER NOT NULL, valid_count INTEGER NOT NULL,
+ temp_sum REAL, temp_min REAL, temp_max REAL,
+ humidity_sum REAL, humidity_min REAL, humidity_max REAL,
+ co2_sum REAL, co2_min REAL, co2_max REAL,
+ radar_count INTEGER NOT NULL DEFAULT 0, presence_count INTEGER NOT NULL DEFAULT 0);)SQL";
+}
 Json failure(const std::string& reason) { return Json{{"ok", false}, {"error", reason}}; }
 bool numeric(const Json& j, const char* key, double& x) {
   if (!j.contains(key) || !j[key].is_number()) return false;
@@ -49,7 +63,8 @@ struct Metric {
   double sum = 0, lo = 0, hi = 0;
   void add(double x, bool first) { sum += x; lo = first ? x : std::min(lo,x); hi = first ? x : std::max(hi,x); }
 };
-struct Bucket { int total = 0, valid = 0; Metric t,h,c; };
+// One room-state summary: environment readings plus how often the radar saw the baby.
+struct Bucket { int total = 0, valid = 0, radar = 0, presence = 0; Metric t,h,c; };
 }
 struct HistoryStore::Impl {
   Config cfg;
@@ -70,9 +85,11 @@ struct HistoryStore::Impl {
   uint64_t dropped = 0;
   std::thread worker;
   std::map<int64_t,Bucket> buckets;
-  // Device namespace -> last sequence. Persisted with the minute summaries.
+  // Device namespace -> last sequence. Persisted with the summaries.
   std::map<std::string,int64_t> sources;
   std::map<std::string,double> source_seen;
+  // Radar publication identity (boot_id -> seq); only used to count each publication once.
+  std::map<std::string,int64_t> radar_seen;
   std::string last_error;
   std::unique_ptr<HistoryRecords> records;
   bool disk_full=false;
@@ -80,6 +97,9 @@ struct HistoryStore::Impl {
   explicit Impl(Config c) : cfg(std::move(c)) {
     if (cfg.retention_days < 7 || cfg.retention_days > 365 || cfg.max_mib < 4 || cfg.max_mib > 1024)
       throw std::invalid_argument("history retention must be 7..365 days; size 4..1024 MiB");
+    if (cfg.bucket_s != 3600 && cfg.bucket_s != 7200)
+      throw std::invalid_argument("history room-state bucket must be 3600 or 7200 seconds");
+    if (cfg.flush_s < 1 || cfg.flush_s > 600) throw std::invalid_argument("history flush interval must be 1..600 seconds");
     if (!cfg.now) cfg.now = [] {
       return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
     };
@@ -93,24 +113,42 @@ struct HistoryStore::Impl {
     }
     try {
       sqlite3_busy_timeout(db, 1000);
-      exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=64; PRAGMA journal_size_limit=1048576;");
-      Statement version(db,"PRAGMA user_version");
-      if (sqlite3_step(version.p) != SQLITE_ROW || sqlite3_column_int(version.p,0) > 2)
-        throw std::runtime_error("unsupported history schema version");
-      Statement page(db,"PRAGMA page_size");
-      if (sqlite3_step(page.p) != SQLITE_ROW) throw std::runtime_error("cannot read database page size");
-      const auto page_size = sqlite3_column_int(page.p,0);
+      // WAL + NORMAL cannot corrupt the database; a power cut loses at most the last commit.
+      exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576;");
+      // Statements are scoped so none is still open when tables are dropped below (SQLITE_LOCKED).
+      { Statement version(db,"PRAGMA user_version");
+        if (sqlite3_step(version.p) != SQLITE_ROW || sqlite3_column_int(version.p,0) > kSchemaVersion)
+          throw std::runtime_error("unsupported history schema version"); }
+      int page_size=0;
+      { Statement page(db,"PRAGMA page_size");
+        if (sqlite3_step(page.p) != SQLITE_ROW) throw std::runtime_error("cannot read database page size");
+        page_size = sqlite3_column_int(page.p,0); }
       exec(db,"PRAGMA max_page_count="+std::to_string(int64_t(cfg.max_mib)*1024*1024/page_size));
       exec(db,"BEGIN IMMEDIATE");
+      exec(db, bucket_table("environment_buckets"));
       exec(db, R"SQL(
-CREATE TABLE IF NOT EXISTS environment_minutes(
- minute_s INTEGER PRIMARY KEY, total_count INTEGER NOT NULL, valid_count INTEGER NOT NULL,
- temp_sum REAL, temp_min REAL, temp_max REAL,
- humidity_sum REAL, humidity_min REAL, humidity_max REAL,
- co2_sum REAL, co2_min REAL, co2_max REAL);
 CREATE TABLE IF NOT EXISTS environment_sources(source TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
-
+CREATE TABLE IF NOT EXISTS history_metadata(key TEXT PRIMARY KEY,value REAL NOT NULL);
 )SQL");
+      const auto bucket=std::to_string(cfg.bucket_s);
+      const auto sums="sum(total_count),sum(valid_count),sum(temp_sum),min(temp_min),max(temp_max),"
+        "sum(humidity_sum),min(humidity_min),max(humidity_max),sum(co2_sum),min(co2_min),max(co2_max)";
+      // Schema 1-2 kept one row per minute; fold them into room-state buckets.
+      if (table_exists(db,"environment_minutes")) {
+        exec(db,"INSERT INTO environment_buckets SELECT minute_s/"+bucket+"*"+bucket+","+sums+",0,0 FROM environment_minutes "
+          "WHERE 1 GROUP BY 1 ON CONFLICT(bucket_s) DO NOTHING; DROP TABLE environment_minutes;");
+      }
+      // Re-bucket when the configured length changes (1 h <-> 2 h).
+      int stored_bucket=0;
+      { Statement stored(db,"SELECT value FROM history_metadata WHERE key='environment_bucket_s'");
+        if (sqlite3_step(stored.p)==SQLITE_ROW) stored_bucket=sqlite3_column_int(stored.p,0); }
+      if (stored_bucket && stored_bucket!=cfg.bucket_s) {
+        exec(db,bucket_table("environment_buckets_new"));
+        exec(db,"INSERT INTO environment_buckets_new SELECT bucket_s/"+bucket+"*"+bucket+","+sums+
+          ",sum(radar_count),sum(presence_count) FROM environment_buckets WHERE 1 GROUP BY 1; "
+          "DROP TABLE environment_buckets; ALTER TABLE environment_buckets_new RENAME TO environment_buckets;");
+      }
+      exec(db,"INSERT INTO history_metadata VALUES('environment_bucket_s',"+bucket+") ON CONFLICT(key) DO UPDATE SET value=excluded.value");
       bool seen_column=false;
       { Statement columns(db,"PRAGMA table_info(environment_sources)");
         while(sqlite3_step(columns.p)==SQLITE_ROW) {
@@ -121,13 +159,13 @@ CREATE TABLE IF NOT EXISTS environment_sources(source TEXT PRIMARY KEY, sequence
       if(!seen_column)exec(db,"ALTER TABLE environment_sources ADD COLUMN seen_s REAL NOT NULL DEFAULT 0");
       { Statement migrate(db,"UPDATE environment_sources SET seen_s=? WHERE seen_s=0");
         migrate.real(1,cfg.now());migrate.done(db); }
-      Statement load(db,"SELECT source,sequence,seen_s FROM environment_sources");
-      while (sqlite3_step(load.p)==SQLITE_ROW) {
-        const auto source=std::string(reinterpret_cast<const char*>(sqlite3_column_text(load.p,0)));
-        sources[source]=sqlite3_column_int64(load.p,1);source_seen[source]=sqlite3_column_double(load.p,2);
-      }
-      records=std::make_unique<HistoryRecords>(db);
-      exec(db,"PRAGMA user_version=2; COMMIT");
+      { Statement load(db,"SELECT source,sequence,seen_s FROM environment_sources");
+        while (sqlite3_step(load.p)==SQLITE_ROW) {
+          const auto source=std::string(reinterpret_cast<const char*>(sqlite3_column_text(load.p,0)));
+          sources[source]=sqlite3_column_int64(load.p,1);source_seen[source]=sqlite3_column_double(load.p,2);
+        } }
+      records=std::make_unique<HistoryRecords>(db,cfg.bucket_s);
+      exec(db,"PRAGMA user_version="+std::to_string(kSchemaVersion)+"; COMMIT");
       worker = std::thread([this]{run();});
     } catch (...) { sqlite3_exec(db,"ROLLBACK",nullptr,nullptr,nullptr); sqlite3_close(db); db=nullptr; throw; }
   }
@@ -136,6 +174,12 @@ CREATE TABLE IF NOT EXISTS environment_sources(source TEXT PRIMARY KEY, sequence
     wake.notify_one();
     worker.join();
     sqlite3_close(db);
+  }
+  int64_t bucket_of(double at) const { return static_cast<int64_t>(at)/cfg.bucket_s*cfg.bucket_s; }
+  bool open_bucket(int64_t key) {
+    // Bounded memory even when the disk is full or the system clock jumps (31 days of hourly buckets).
+    if (!buckets.count(key) && buckets.size()>=744) { last_error="history pending bucket limit reached"; return false; }
+    return true;
   }
   // Prefer ESP measurement identity, not the hub's once-per-second publication sequence.
   bool fresh(const Json& j,double at) {
@@ -168,13 +212,10 @@ CREATE TABLE IF NOT EXISTS environment_sources(source TEXT PRIMARY KEY, sequence
     return true;
   }
   void ingest(const Work& w) {
-    const auto minute = static_cast<int64_t>(w.at)/60*60;
-    // Bounded memory even when the disk is full or the system clock jumps.
-    if (!buckets.count(minute) && buckets.size()>=1440) {
-      last_error="history pending minute limit reached"; return;
-    }
+    const auto key = bucket_of(w.at);
+    if (!open_bucket(key)) return;
     if (!fresh(w.sample,w.at)) return;
-    auto& b=buckets[minute]; ++b.total;
+    auto& b=buckets[key]; ++b.total;
     double t,h,c,age;
     bool valid = (!w.sample.contains("valid") || (w.sample["valid"].is_boolean() && w.sample["valid"].get<bool>()));
     if (w.sample.contains("age_s")) valid = valid && numeric(w.sample,"age_s",age) && age>=0 && age<=20;
@@ -186,17 +227,35 @@ CREATE TABLE IF NOT EXISTS environment_sources(source TEXT PRIMARY KEY, sequence
     }
     if (valid) { b.t.add(t,b.valid==0); b.h.add(h,b.valid==0); b.c.add(c,b.valid==0); ++b.valid; records->environment(w.sample,w.at); }
   }
+  // Radar publications only count how much of the bucket the baby was in view (no per-minute statistics).
+  void radar(const Work& w) {
+    const auto& j=w.sample;
+    if (!j.contains("boot_id") || !j["boot_id"].is_string() || !j.contains("seq") || !j["seq"].is_number_integer()) return;
+    const auto boot=j["boot_id"].get<std::string>();const auto seq=j["seq"].get<int64_t>();
+    if (boot.empty() || boot.size()>160 || seq<0) return;
+    auto it=radar_seen.find(boot);
+    if (it!=radar_seen.end() && seq<=it->second) return;
+    if (it==radar_seen.end() && radar_seen.size()>=64) radar_seen.erase(radar_seen.begin());
+    radar_seen[boot]=seq;
+    const bool usable=(!j.contains("presence_valid") || (j["presence_valid"].is_boolean() && j["presence_valid"].get<bool>())) &&
+                      (!j.contains("valid") || (j["valid"].is_boolean() && j["valid"].get<bool>()));
+    if (!usable) return;
+    const auto key=bucket_of(w.at);
+    if (!open_bucket(key)) return;
+    auto& b=buckets[key];++b.radar;
+    if (j.contains("presence") && j["presence"].is_boolean() && j["presence"].get<bool>()) ++b.presence;
+  }
   void flush(int64_t before) {
     disk_full=false;
     records->make_room();
     exec(db,"BEGIN IMMEDIATE");
     try {
-      Statement prune(db,"DELETE FROM environment_minutes WHERE minute_s < ?");
+      Statement prune(db,"DELETE FROM environment_buckets WHERE bucket_s < ?");
       prune.integer(1,static_cast<int64_t>(cfg.now())-int64_t(cfg.retention_days)*86400); prune.done(db);
-      for (const auto& [minute,b]:buckets) {
-        if (minute>=before) continue;
-        Statement s(db,R"SQL(INSERT INTO environment_minutes VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(minute_s) DO UPDATE SET
+      for (const auto& [key,b]:buckets) {
+        if (key>=before) continue;
+        Statement s(db,R"SQL(INSERT INTO environment_buckets VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(bucket_s) DO UPDATE SET
  total_count=total_count+excluded.total_count,valid_count=valid_count+excluded.valid_count,
  temp_sum=coalesce(temp_sum,0)+coalesce(excluded.temp_sum,0),
  temp_min=min(coalesce(temp_min,excluded.temp_min),coalesce(excluded.temp_min,temp_min)),
@@ -206,16 +265,18 @@ ON CONFLICT(minute_s) DO UPDATE SET
  humidity_max=max(coalesce(humidity_max,excluded.humidity_max),coalesce(excluded.humidity_max,humidity_max)),
  co2_sum=coalesce(co2_sum,0)+coalesce(excluded.co2_sum,0),
  co2_min=min(coalesce(co2_min,excluded.co2_min),coalesce(excluded.co2_min,co2_min)),
- co2_max=max(coalesce(co2_max,excluded.co2_max),coalesce(excluded.co2_max,co2_max)))SQL");
-        s.integer(1,minute);s.integer(2,b.total);s.integer(3,b.valid);
+ co2_max=max(coalesce(co2_max,excluded.co2_max),coalesce(excluded.co2_max,co2_max)),
+ radar_count=radar_count+excluded.radar_count,presence_count=presence_count+excluded.presence_count)SQL");
+        s.integer(1,key);s.integer(2,b.total);s.integer(3,b.valid);
         if (b.valid) {
           int i=4;
           for (const auto& m:{b.t,b.h,b.c}) {s.real(i++,m.sum);s.real(i++,m.lo);s.real(i++,m.hi);}
         }
+        s.integer(13,b.radar);s.integer(14,b.presence);
         s.done(db);
       }
       // Only checkpoint identities if ALL pending samples are persisted. Otherwise a crash
-      // could mark a current-minute sample seen without its corresponding aggregate.
+      // could mark a current-bucket sample seen without its corresponding aggregate.
       if (before==kMaxTime) {
         const double cutoff=cfg.now()-int64_t(cfg.retention_days)*86400;
         for(auto it=sources.begin();it!=sources.end();) {
@@ -230,7 +291,7 @@ ON CONFLICT(minute_s) DO UPDATE SET
       exec(db,"COMMIT");
       records->committed();
       for (auto it=buckets.begin();it!=buckets.end();) { if (it->first<before) it=buckets.erase(it); else ++it; }
-      sqlite3_wal_checkpoint_v2(db,nullptr,SQLITE_CHECKPOINT_TRUNCATE,nullptr,nullptr);
+      // Checkpoints are left to wal_autocheckpoint; forcing one per commit doubled SD card writes.
       last_error.clear();
     } catch (...) {
       const int code=sqlite3_errcode(db);
@@ -241,18 +302,21 @@ ON CONFLICT(minute_s) DO UPDATE SET
     }
   }
   Json select(const Work& w) {
-    Statement s(db,"SELECT * FROM environment_minutes WHERE minute_s>=? AND minute_s<? ORDER BY minute_s LIMIT ?");
+    Statement s(db,"SELECT * FROM environment_buckets WHERE bucket_s>=? AND bucket_s<? ORDER BY bucket_s LIMIT ?");
     s.integer(1,w.from);s.integer(2,w.to);s.integer(3,int64_t(w.limit)+1);
     Json rows=Json::array();
     int result;
     while ((result=sqlite3_step(s.p))==SQLITE_ROW) {
-      Json row{{"minute_s",sqlite3_column_int64(s.p,0)},{"total_count",sqlite3_column_int(s.p,1)},{"valid_count",sqlite3_column_int(s.p,2)}};
+      Json row{{"bucket_s",sqlite3_column_int64(s.p,0)},{"total_count",sqlite3_column_int(s.p,1)},{"valid_count",sqlite3_column_int(s.p,2)}};
       const int n=sqlite3_column_int(s.p,2);
       int i=3;
       for (const char* name:{"temperature_c","humidity_pct","co2_ppm"}) {
         row[name]=n ? Json{{"mean",sqlite3_column_double(s.p,i)/n},{"min",sqlite3_column_double(s.p,i+1)},{"max",sqlite3_column_double(s.p,i+2)}} : Json(nullptr);
         i+=3;
       }
+      const int radar=sqlite3_column_int(s.p,12);
+      row["radar_count"]=radar;
+      row["presence_ratio"]=radar ? Json(double(sqlite3_column_int(s.p,13))/radar) : Json(nullptr);
       rows.push_back(std::move(row));
     }
     if (result!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
@@ -260,7 +324,8 @@ ON CONFLICT(minute_s) DO UPDATE SET
     if (truncated) rows.erase(rows.end()-1);
     uint64_t lost;
     {std::lock_guard<std::mutex> lock(mutex);lost=dropped;}
-    return Json{{"ok",true},{"time_unit","unix_seconds"},{"records",rows},{"truncated",truncated},{"dropped_samples",lost},{"limited_by_size",records->limited("environment_minutes",w.from)}};
+    return Json{{"ok",true},{"time_unit","unix_seconds"},{"bucket_seconds",cfg.bucket_s},{"records",rows},{"truncated",truncated},
+      {"dropped_samples",lost},{"limited_by_size",records->limited("environment_buckets",w.from)}};
   }
   void drain() {
     // Each chunk is atomic. Keep uncommitted event payloads queued for the next chunk.
@@ -274,7 +339,7 @@ ON CONFLICT(minute_s) DO UPDATE SET
     }
   }
   void run() {
-    auto next_event_flush=std::chrono::steady_clock::now();
+    auto next_flush=std::chrono::steady_clock::now()+std::chrono::seconds(cfg.flush_s);
     while (true) {
       std::deque<Work> batch;
       bool stop;
@@ -293,12 +358,12 @@ ON CONFLICT(minute_s) DO UPDATE SET
             } else {
               drain();
               Json result=w.kind=="summary"?records->summary(w.from,w.to,w.limit):
-                w.kind=="sensors"?records->sensors(w.from,w.to,w.limit):
                 w.kind=="events"?records->events(w.from,w.to,w.limit,w.after):select(w);
               {std::lock_guard<std::mutex> lock(mutex);result["dropped_samples"]=dropped;}
               w.reply->set_value(std::move(result));
             }
           } else if(w.topic=="sensor/env") ingest(w);
+          else if(w.topic=="sensor/radar") radar(w);
           else records->ingest(w.topic,w.sample,w.at);
         } catch (const std::exception& e) {
           last_error=e.what();
@@ -308,12 +373,9 @@ ON CONFLICT(minute_s) DO UPDATE SET
       }
       try {
         if (stop) {drain();break;}
-        const auto minute=static_cast<int64_t>(cfg.now())/60*60;
-        // Persist all pending samples together once the oldest minute ends, including
-        // the new partial minute, so restart dedup checkpoints remain atomic.
-        if ((!buckets.empty() && buckets.begin()->first<minute) ||
-            (records->dirty() && std::chrono::steady_clock::now()>=next_event_flush)) {
-          flush(kMaxTime);next_event_flush=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+        // Batch everything pending into one commit every flush_s (SD card wear).
+        if ((!buckets.empty() || records->dirty()) && std::chrono::steady_clock::now()>=next_flush) {
+          flush(kMaxTime);next_flush=std::chrono::steady_clock::now()+std::chrono::seconds(cfg.flush_s);
         }
       } catch (const std::exception& e) {
         std::cerr<<"[history] "<<e.what()<<"\n";
@@ -329,7 +391,8 @@ bool HistoryStore::observe(const Json& sample,double at,bool retained) {
   return record("sensor/env",sample,at,retained);
 }
 bool HistoryStore::record(const std::string& topic,const Json& sample,double at,bool retained) {
-  if(topic!="sensor/env"&&topic!="sensor/radar"&&topic!="audio/cry"&&topic.rfind("cry/",0)!=0&&
+  // Microphone results are not stored (cry episodes come from cry/*).
+  if(topic!="sensor/env"&&topic!="sensor/radar"&&topic.rfind("cry/",0)!=0&&
      topic!="fusion/alert"&&topic!="event/tof"&&topic.rfind("control/",0)!=0)return false;
   if (retained || !sample.is_object() || !std::isfinite(at) || at<0 || at>kMaxTime) return false;
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -340,7 +403,6 @@ bool HistoryStore::record(const std::string& topic,const Json& sample,double at,
 }
 Json HistoryStore::query(int64_t from,int64_t to,uint32_t limit) { return request("environment",from,to,limit); }
 Json HistoryStore::summary(int64_t from,int64_t to,uint32_t limit) { return request("summary",from,to,limit); }
-Json HistoryStore::sensor_history(int64_t from,int64_t to,uint32_t limit) { return request("sensors",from,to,limit); }
 Json HistoryStore::events(int64_t from,int64_t to,uint32_t limit,int64_t after) { return request("events",from,to,limit,after); }
 Json HistoryStore::import_cry_log(const std::string& path) {
   auto reply=std::make_shared<std::promise<Json>>();auto result=reply->get_future();
