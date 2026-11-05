@@ -44,3 +44,7 @@ cry_model/rir/
 *.log
 .DS_Store
 Thumbs.db
+
+# Local IDE settings and atlas SDK environment
+/.idea/
+/atlas/atlas_docker_env/

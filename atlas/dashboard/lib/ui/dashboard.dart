@@ -28,6 +28,10 @@ class _DashboardState extends State<Dashboard> {
   @override
   void initState() {
     super.initState();
+    if (s.usesDatabaseHistory) {
+      _sample = const bool.fromEnvironment('NUNI_SAMPLE_HISTORY',
+          defaultValue: false);
+    }
     _examples = sampleHistory(DateTime.now());
     _history = CareHistory(s, filePath: widget.historyPath)
       ..addListener(_refresh);
@@ -35,8 +39,12 @@ class _DashboardState extends State<Dashboard> {
 
   void _refresh() {
     if (s.state.level != 'alert') _ack = false;
-    if (_asking != null && s.cry?.episode(_asking)?.action != null)
+    if (_asking != null &&
+        (s.cry?.episode(_asking)?.action != null ||
+            _history.real.records
+                .any((r) => r.id == _asking && r.action != null))) {
       _asking = null;
+    }
     if (mounted) setState(() {});
   }
 

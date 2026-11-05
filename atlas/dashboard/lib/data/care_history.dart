@@ -4,98 +4,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'models.dart';
 import 'store.dart';
-
-class CareRecord {
-  const CareRecord(this.id, this.at, this.seconds, this.action);
-  final String id;
-  final DateTime at;
-  final int seconds;
-  final String? action;
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'at': at.toIso8601String(),
-        'seconds': seconds,
-        'action': action
-      };
-  factory CareRecord.fromJson(Map<String, dynamic> j) => CareRecord(
-      j['id'] as String,
-      DateTime.parse(j['at'] as String),
-      j['seconds'] as int,
-      j['action'] as String?);
-}
-
-class EnvironmentRecord {
-  const EnvironmentRecord(
-      this.at, this.temp, this.humidity, this.co2, this.quietMinutes);
-  final DateTime at;
-  final double temp, humidity, co2;
-  final int quietMinutes;
-  Map<String, dynamic> toJson() => {
-        'at': at.toIso8601String(),
-        'temp': temp,
-        'humidity': humidity,
-        'co2': co2,
-        'quiet': quietMinutes
-      };
-  factory EnvironmentRecord.fromJson(Map<String, dynamic> j) =>
-      EnvironmentRecord(
-          DateTime.parse(j['at'] as String),
-          (j['temp'] as num).toDouble(),
-          (j['humidity'] as num).toDouble(),
-          (j['co2'] as num).toDouble(),
-          j['quiet'] as int);
-}
-
-class HistoryView {
-  const HistoryView(this.records, this.environment, {this.sample = false});
-  final List<CareRecord> records;
-  final List<EnvironmentRecord> environment;
-  final bool sample;
-  List<int> get hourly {
-    final counts = List<int>.filled(24, 0);
-    for (final r in records) {
-      counts[r.at.hour]++;
-    }
-    return counts;
-  }
-
-  int get peakBlock {
-    final h = hourly;
-    var best = 0, peak = 0;
-    for (var b = 0; b < 8; b++) {
-      final n = h.sublist(b * 3, b * 3 + 3).fold(0, (a, v) => a + v);
-      if (n > peak) {
-        best = b;
-        peak = n;
-      }
-    }
-    return best;
-  }
-
-  static const blockLabels = [
-    '자정–새벽 3시',
-    '새벽 3–6시',
-    '오전 6–9시',
-    '오전 9시–정오',
-    '정오–오후 3시',
-    '오후 3–6시',
-    '오후 6–9시',
-    '오후 9시–자정'
-  ];
-  List<EnvironmentRecord> get quiet =>
-      environment.where((e) => e.quietMinutes >= 10).toList();
-  String? get temperatureRange {
-    if (quiet.length < 3) return null;
-    final values = quiet.map((e) => e.temp).toList()..sort();
-    return '${values.first.floor()}–${values.last.ceil()}℃';
-  }
-
-  String? get humidityRange {
-    if (quiet.length < 3) return null;
-    final values = quiet.map((e) => e.humidity).toList()..sort();
-    return '${(values.first / 5).floor() * 5}–${(values.last / 5).ceil() * 5}%';
-  }
-}
+import 'history_models.dart';
+export 'history_models.dart';
 
 /// Example history is a separate display fixture, never fed to real learning or feedback.
 HistoryView sampleHistory(DateTime now) {
@@ -200,6 +110,13 @@ class CareHistory extends ChangeNotifier {
   Future<void> _writes = Future.value();
 
   HistoryView get real {
+    if (store.usesDatabaseHistory) {
+      final data = store.recordedHistory ??
+          const HistoryView([], [], database: true, available: false);
+      return data.withStatus(
+          loading: store.historyLoading && store.recordedHistory == null,
+          error: store.historyError);
+    }
     final cutoff = now().subtract(const Duration(days: 7));
     final records = _records.values.where((e) => e.at.isAfter(cutoff)).toList()
       ..sort((a, b) => b.at.compareTo(a.at));
@@ -234,8 +151,9 @@ class CareHistory extends ChangeNotifier {
     var changed = false;
     for (final ep in store.cry?.episodes ?? <CryEpisode>[]) {
       final previous = _records[ep.id];
-      if (previous == null ||
-          (ep.action != null && previous.action != ep.action)) {
+      if (!store.usesDatabaseHistory &&
+          (previous == null ||
+              (ep.action != null && previous.action != ep.action))) {
         _records[ep.id] =
             CareRecord(ep.id, ep.t0, ep.length.inSeconds, ep.action);
         changed = true;
@@ -254,12 +172,15 @@ class CareHistory extends ChangeNotifier {
     }
     final t = now();
     final quiet = store.soundAvailable && store.sensors.cry?.isCrying == false;
-    if (!quiet || (_lastSeen != null && t.difference(_lastSeen!).inSeconds > 5))
+    if (!quiet ||
+        (_lastSeen != null && t.difference(_lastSeen!).inSeconds > 5)) {
       _quietSince = null;
+    }
     if (quiet) _quietSince ??= t;
     _lastSeen = t;
     final r = store.roomAvailable ? store.sensors.room : null;
-    if (r?.temp != null &&
+    if (!store.usesDatabaseHistory &&
+        r?.temp != null &&
         r?.humidity != null &&
         r?.co2 != null &&
         r!.temp!.isFinite &&
@@ -302,8 +223,9 @@ class CareHistory extends ChangeNotifier {
       choices.remove(id);
       _failed.remove(id);
       final old = _records[id];
-      if (old != null)
+      if (old != null) {
         _records[id] = CareRecord(old.id, old.at, old.seconds, action);
+      }
     } else {
       _failed.add(id);
     }
@@ -318,8 +240,8 @@ class CareHistory extends ChangeNotifier {
     if (filePath == null || !_ready) return;
     final payload = jsonEncode({
       'v': 1,
-      'records': real.records.map((e) => e.toJson()).toList(),
-      'environment': real.environment.map((e) => e.toJson()).toList(),
+      'records': _records.values.map((e) => e.toJson()).toList(),
+      'environment': _environment.map((e) => e.toJson()).toList(),
       'choices': choices
     });
     _writes = _writes.then((_) async {
