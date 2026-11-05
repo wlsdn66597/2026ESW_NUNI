@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from rule import TemperatureRule, Co2Rule, validate_command
+from rule import TemperatureRule, Co2Rule, DemoOverride, validate_command
 from gateway import Device
 from thinq_mock import ThinQMock, payload_for
 
@@ -83,6 +83,42 @@ class RuleTests(unittest.TestCase):
         for change in ({"on": 1}, {"role": "air_purifier"}, {"mode": "real"},
                        {"issued_at": 104}, {"expires_at": 100}, {"expires_at": 1000}):
             self.assertFalse(validate_command(command(**change), "air_conditioner", 101), change)
+
+
+def demo_msg(action="start", **kwargs):
+    d = {"v": 1, "id": "demo-1", "action": action, "duration_s": 30, "temp": 27, "co2": 1200, "issued_at": 100}
+    d.update(kwargs)
+    return d
+
+
+class DemoOverrideTests(unittest.TestCase):
+    def test_start_runs_for_duration_then_ends(self):
+        d = DemoOverride()
+        self.assertTrue(d.accept(demo_msg(), 100))
+        self.assertTrue(d.active(129.9)); self.assertAlmostEqual(d.remaining(110), 20)
+        self.assertFalse(d.active(130)); self.assertEqual(d.remaining(131), 0)
+
+    def test_demo_samples_turn_both_models_on_without_touching_real_rules(self):
+        d, real_t, demo_t, demo_c = DemoOverride(), TemperatureRule(), TemperatureRule(hold=0), Co2Rule(hold=0)
+        real_t.update(sample(20), 100, 0)
+        d.accept(demo_msg(), 100)
+        for wall in (100, 101):
+            demo_t.update(d.sample(wall), wall, wall - 100); demo_c.update(d.sample(wall), wall, wall - 100)
+        self.assertTrue(demo_t.tick(1)); self.assertTrue(demo_c.tick(1))
+        self.assertFalse(real_t.tick(1)); self.assertEqual(real_t.temp, 20)
+
+    def test_stop_and_restart(self):
+        d = DemoOverride()
+        d.accept(demo_msg(), 100); self.assertTrue(d.accept(demo_msg("stop", id="demo-2"), 105))
+        self.assertFalse(d.active(105))
+        d.accept(demo_msg(id="demo-3", issued_at=106), 106); self.assertAlmostEqual(d.remaining(106), 30)
+
+    def test_invalid_or_old_demo_rejected(self):
+        d = DemoOverride()
+        for bad in (demo_msg(v=2), demo_msg(action="go"), demo_msg(duration_s=0), demo_msg(duration_s=61),
+                    demo_msg(temp="hot"), demo_msg(co2=-1), demo_msg(issued_at=80), {"v": 1}):
+            self.assertFalse(d.accept(bad, 100), bad)
+        self.assertFalse(d.active(100))
 
 
 class FakeSerial:

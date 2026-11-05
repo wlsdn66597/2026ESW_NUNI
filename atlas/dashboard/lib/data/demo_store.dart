@@ -185,6 +185,15 @@ class DemoStore extends NuniStore {
   }
 
   @override
+  Future<String?> setApplianceDemo(int seconds) async {
+    // 미리보기 화면: 모형이 없으니 남은 시간 표시만 흉내 낸다
+    applianceDemoUntil =
+        seconds > 0 ? DateTime.now().add(Duration(seconds: seconds)) : null;
+    showNotice(seconds > 0 ? '가전 시연을 시작했어요 · $seconds초' : '가전 시연을 끝냈어요');
+    return null;
+  }
+
+  @override
   void dispose() {
     _timer?.cancel();
     super.dispose();

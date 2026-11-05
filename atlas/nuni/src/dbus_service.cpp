@@ -70,6 +70,13 @@ class SdbusService : public DbusService {
             sdbus::registerMethod("LogFeed").withOutputParamNames("result_json").implementedAs([this]() {
               return h_.log_feed ? h_.log_feed() : unavailable();
             }),
+            sdbus::registerMethod("StartApplianceDemo")
+                .withInputParamNames("seconds")
+                .withOutputParamNames("result_json")
+                .implementedAs([this](uint32_t seconds) {
+                  return h_.start_appliance_demo ? h_.start_appliance_demo(seconds)
+                    : dump(Json{{"ok", false}, {"error", "appliance demo unavailable"}});
+                }),
             sdbus::registerSignal("StateChanged").withParameters<std::string>("state_json"),
             sdbus::registerSignal("Alert").withParameters<std::string, std::string>("level", "reason"),
             sdbus::registerSignal("CryDetected").withParameters<double>("score"),

@@ -8,16 +8,24 @@ import signal
 import time
 import uuid
 import paho.mqtt.client as mqtt
-from rule import TemperatureRule, Co2Rule, HumidityRule, ROLES, PREFIX
+from rule import TemperatureRule, Co2Rule, HumidityRule, DemoOverride, DEMO_TOPIC, ROLES, PREFIX
 from thinq_mock import ThinQMock
 
 LOG = logging.getLogger("nuni-appliance-policy")
 
 
-async def run(args):
+def appliance_rules(args, hold=None):
     # Each demonstrator follows its own reading: air conditioner = temperature, air purifier = CO2.
-    rules = {"air_conditioner": TemperatureRule(args.cool_on_at, args.cool_off_at, args.hold),
-             "air_purifier": Co2Rule(args.co2_on_above, args.co2_off_at, args.hold)}
+    hold = args.hold if hold is None else hold
+    return {"air_conditioner": TemperatureRule(args.cool_on_at, args.cool_off_at, hold),
+            "air_purifier": Co2Rule(args.co2_on_above, args.co2_off_at, hold)}
+
+
+async def run(args):
+    real_rules = appliance_rules(args)
+    # Fed only by the dashboard demo button, reset for each demo. No confirm delay: the values are deliberate.
+    demo_rules = appliance_rules(args, hold=0)
+    demo = DemoOverride()
     humidity = HumidityRule(args.humidity_on_below, args.humidity_off_at, args.hold)
     incoming = queue.Queue(maxsize=64)
     stopped = asyncio.Event()
@@ -30,7 +38,9 @@ async def run(args):
     def on_connect(c, userdata, flags, code, properties):
         nonlocal connected
         connected = code == 0
-        if connected: c.subscribe(args.topic, qos=1)
+        if connected:
+            c.subscribe(args.topic, qos=1)
+            c.subscribe(DEMO_TOPIC, qos=1)
 
     def on_disconnect(*unused):
         nonlocal connected
@@ -40,7 +50,7 @@ async def run(args):
         if msg.retain or len(msg.payload) > 8192: return
         try:
             data = json.loads(msg.payload)
-            if isinstance(data, dict): incoming.put_nowait(data)
+            if isinstance(data, dict): incoming.put_nowait((msg.topic, data))
         except (ValueError, queue.Full): pass
 
     client.on_connect, client.on_disconnect, client.on_message = on_connect, on_disconnect, on_message
@@ -53,24 +63,37 @@ async def run(args):
             while not stopped.is_set():
                 mono, wall = time.monotonic(), time.time()
                 for _ in range(64):
-                    try: data = incoming.get_nowait()
+                    try: topic, data = incoming.get_nowait()
                     except queue.Empty: break
-                    for rule in rules.values(): rule.update(data, wall, mono)
+                    if topic == DEMO_TOPIC:
+                        was = demo.active(wall)
+                        if demo.accept(data, wall):
+                            LOG.info("appliance demo %s (%.0f s left)", data.get("action"), demo.remaining(wall))
+                            if not was: demo_rules = appliance_rules(args, hold=0)
+                        continue
+                    for rule in real_rules.values(): rule.update(data, wall, mono)
                     humidity.update(data, wall, mono)
-                for rule in rules.values(): rule.tick(mono, connected)
+                demo_on = demo.active(wall)
+                if demo_on:
+                    for rule in demo_rules.values(): rule.update(demo.sample(wall), wall, mono)
+                for rule in list(real_rules.values()) + list(demo_rules.values()): rule.tick(mono, connected)
                 humidity.tick(mono, connected)
-                state = tuple((r.on, r.reason) for r in rules.values()) + (humidity.on, humidity.reason)
+                rules = demo_rules if demo_on else real_rules
+                input_topic = DEMO_TOPIC if demo_on else args.topic
+                state = (demo_on,) + tuple((r.on, r.reason) for r in rules.values()) + (humidity.on, humidity.reason)
                 if connected and (mono >= next_send or state != last_state):
                     for role in ROLES:
                         rule = rules[role]
                         result = await thinq.control(role, rule.on)
                         command = {"v": 1, "id": uuid.uuid4().hex, "role": role, "on": rule.on,
                             "mode": "thinq_sdk_mock", "issued_at": wall, "expires_at": wall + 6,
-                            "reason": rule.reason, rule.key: rule.value, "sample_id": rule.sample_id,
-                            "input_topic": args.topic, "thinq": result}
+                            "reason": ("demo:" if demo_on else "") + rule.reason, rule.key: rule.value,
+                            "sample_id": rule.sample_id, "input_topic": input_topic, "demo": demo_on,
+                            "thinq": result}
                         client.publish(f"{PREFIX}/{role}/command", json.dumps(command), qos=1, retain=False)
                     client.publish(f"{PREFIX}/policy", json.dumps({"v": 1, "mode": "thinq_sdk_mock",
-                        "cloud_confirmed": False, "input_topic": args.topic, "ts": wall,
+                        "cloud_confirmed": False, "input_topic": input_topic, "ts": wall,
+                        "demo": {"active": demo_on, "remaining_s": round(demo.remaining(wall), 1)},
                         "roles": {role: {"desired_on": r.on, "reason": r.reason, "input": r.key, "value": r.value,
                                          "on_at": r.on_at, "off_at": r.off_at} for role, r in rules.items()}}),
                         retain=False)
@@ -85,7 +108,7 @@ async def run(args):
                             "off_at_pct": humidity.off_at, "ts": wall}), retain=False)
                     next_send = mono + 2
                 if state != last_state:
-                    LOG.info("demo %s", " ".join(f"{role}={r.on}({r.reason}, {r.key}={r.value})"
+                    LOG.info("demo%s %s", "[button]" if demo_on else "", " ".join(f"{role}={r.on}({r.reason}, {r.key}={r.value})"
                                                  for role, r in rules.items()))
                     last_state = state
                 await asyncio.sleep(.1)

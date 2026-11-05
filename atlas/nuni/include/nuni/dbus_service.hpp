@@ -15,6 +15,8 @@
 //           AnswerCry(s id, s action) → s     "무엇으로 그쳤나요?" 답 → {"ok":true,…} 또는 {"ok":false,"error":…}
 //           AnswerCryNot(s id, s action) → s  "해 봤는데 안 그쳤어요"
 //           LogFeed() → s            지금 수유했다고 기록
+//           StartApplianceDemo(u seconds) → s  가전 모형 시연: seconds 동안 시연용 온도·CO₂를 가전 정책에만 보낸다
+//                                    (0이면 끝내기). 실제 센서 값·기록 DB의 방 상태는 바꾸지 않는다
 //   신호    StateChanged(s)          fusion/state JSON (발행할 때마다)
 //           Alert(s level, s reason) 경보 이벤트(fusion/alert)
 //           CryDetected(d score)     울음 감지(audio/cry의 is_crying이 거짓→참이 될 때)
@@ -50,6 +52,7 @@ struct DbusHandlers {
   std::function<std::string(const std::string& id, const std::string& action)> answer_cry;
   std::function<std::string(const std::string& id, const std::string& action)> answer_cry_not;
   std::function<std::string()> log_feed;
+  std::function<std::string(uint32_t seconds)> start_appliance_demo;
 };
 
 inline constexpr const char* kDbusName = "com.atlas.NuniFusion1";

@@ -18,6 +18,7 @@ inline constexpr const char* ALERT = "fusion/alert";         // 경보 이벤트
 inline constexpr const char* CONTROL = "control/action";     // 선제 환경 제어 권고
 inline constexpr const char* SOOTHE = "control/soothe";      // 아기 일어남 → 부모 목소리 재생(사건 기록)
 inline constexpr const char* VIBRATE = "control/vibrate";    // 진동 직접 요청(시험용, 파이 4 nunivibe)
+inline constexpr const char* APPLIANCE_DEMO = "control/appliance_demo";  // 대시보드 가전 시연(시작·끝, policy.py가 받음)
 inline constexpr const char* CRY_EPISODE = "cry/episode";    // 울음 구간 시작·끝·버림(CryLog)
 inline constexpr const char* CRY_HINT = "cry/hint";          // 울음 1·2순위 힌트(cry_personal.hint와 같은 키 + id)
 inline constexpr const char* CRY_FEEDBACK = "cry/feedback";  // 부모 답·'안 그쳤어요'·수유 기록(대시보드 → 기록)

@@ -122,6 +122,9 @@ struct Options {
   bool cry_record = env_on("NUNI_CRY_RECORD", true);  // 울음 소리·임베딩 저장(기기 안에만)
   double cry_end_gap = env_num("NUNI_CRY_END_GAP", 8);
   int cry_min_windows = static_cast<int>(env_num("NUNI_CRY_MIN_WINDOWS", 3));
+  // 대시보드 '가전 시연' 버튼: 가전 정책(policy.py)에만 보내는 시연 값. 26℃ 이상·CO₂ 1000ppm 초과면 두 모형이 켜진다
+  double demo_temp = env_num("NUNI_APPLIANCE_DEMO_TEMP", 27);
+  double demo_co2 = env_num("NUNI_APPLIANCE_DEMO_CO2", 1200);
   // 아기 일어남 → 부모 목소리. 파일은 패키지를 다시 깔아도 남는 /data 아래에 둔다
   bool soothe = env_on("NUNI_ENABLE_SOOTHE", true);
   std::string soothe_wav = env_str("NUNI_SOOTHE_WAV", "/data/nuni/voice/parent.wav");
@@ -394,6 +397,20 @@ int main(int argc, char** argv) {
       Json a = Json::array();
       for (const auto& x : alerts) a.push_back(x);
       return dump(a);
+    };
+    // 가전 시연: control/appliance_demo 한 건만 발행한다. 시간 관리·만료는 policy.py가 하고,
+    // 실제 sensor/env·기록 DB의 방 상태 요약은 건드리지 않는다(이 사건만 기록에 남는다).
+    h.start_appliance_demo = [&](uint32_t seconds) {
+      const double now = wall_now();
+      const uint32_t s = std::min<uint32_t>(seconds, 60);
+      const Json demo{{"v", 1}, {"id", "demo-" + std::to_string(static_cast<int64_t>(now * 1000))},
+                      {"action", s ? "start" : "stop"}, {"duration_s", s}, {"temp", o.demo_temp},
+                      {"co2", o.demo_co2}, {"issued_at", now}, {"until", now + s}};
+      if (!mqtt.connected()) return dump(Json{{"ok", false}, {"error", "MQTT 브로커에 연결되지 않았어요"}});
+      if (!publish_recorded(topics::APPLIANCE_DEMO, demo))
+        return dump(Json{{"ok", false}, {"error", "시연 명령을 보내지 못했어요"}});
+      std::cerr << "[demo] 가전 시연 " << (s ? "시작 " + std::to_string(s) + "초" : std::string("끝")) << "\n";
+      return dump(Json{{"ok", true}, {"demo", demo}});
     };
     if (cry_log) {
       auto result = [&](const std::optional<CryLog::Event>& ev, const std::string& err) {

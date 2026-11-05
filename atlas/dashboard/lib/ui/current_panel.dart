@@ -3,6 +3,7 @@ import '../copy.dart';
 import '../data/care_history.dart';
 import '../data/store.dart';
 import '../theme.dart';
+import 'appliance_demo.dart';
 import 'breath_view.dart';
 import 'common.dart';
 
@@ -347,8 +348,12 @@ class _CurrentEnvironment extends StatelessWidget {
             borderRadius: BorderRadius.circular(16),
             border: Border.all(color: Palette.line)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('아기방 환경', style: Typo.sans(23, weight: 650)),
-          const SizedBox(height: 15),
+          Row(children: [
+            Text('아기방 환경', style: Typo.sans(23, weight: 650)),
+            const Spacer(),
+            ApplianceDemoButton(store: store),
+          ]),
+          const SizedBox(height: 8),
           Row(children: [
             Expanded(child: _RoomValue('온도', room?.temp, '℃', 1)),
             Expanded(child: _RoomValue('습도', room?.humidity, '%', 0)),

@@ -163,3 +163,47 @@ def validate_command(data, role, wall):
     issued, expires = data.get("issued_at"), data.get("expires_at")
     return (number(issued) and number(expires) and -2 <= wall - issued <= 8
             and 0 < expires - wall <= 8 and 0 < expires - issued <= 8)
+
+
+DEMO_TOPIC = "control/appliance_demo"
+
+
+class DemoOverride:
+    """Dashboard 'appliance demo' button: for a few seconds the appliance rules read demo values
+    instead of sensor/env. Only the appliance policy sees them; sensor/env and the history DB stay real.
+
+    start: {"v":1,"id":..,"action":"start","duration_s":1..60,"temp":..,"co2":..,"issued_at":..}
+    stop:  {"v":1,"id":..,"action":"stop","issued_at":..}
+    """
+    MAX_S = 60
+
+    def __init__(self):
+        self.until = self.temp = self.co2 = self.id = None
+
+    def accept(self, data, wall):
+        if not (isinstance(data, dict) and data.get("v") == 1 and data.get("action") in ("start", "stop")
+                and isinstance(data.get("id"), str) and 0 < len(data["id"]) <= 100
+                and number(data.get("issued_at")) and abs(wall - data["issued_at"]) <= 10):
+            return False
+        if data["action"] == "stop":
+            self.until = None
+            return True
+        duration, temp, co2 = data.get("duration_s"), data.get("temp"), data.get("co2")
+        if not (number(duration) and 0 < duration <= self.MAX_S and number(temp) and -10 <= temp <= 60
+                and number(co2) and 0 <= co2 <= 40000):
+            return False
+        self.until = min(data["issued_at"] + duration, wall + self.MAX_S)
+        self.temp, self.co2, self.id = float(temp), float(co2), data["id"]
+        return True
+
+    def active(self, wall):
+        if self.until is not None and wall >= self.until: self.until = None
+        return self.until is not None
+
+    def remaining(self, wall):
+        return max(0.0, self.until - wall) if self.active(wall) else 0.0
+
+    def sample(self, wall):
+        """One synthetic reading per second (a new sample_id each second keeps the rules fresh)."""
+        return {"valid": True, "temp": self.temp, "co2": self.co2, "ts": wall, "age_s": 0,
+                "sample_id": f"demo:{self.id}:{int(wall)}"}

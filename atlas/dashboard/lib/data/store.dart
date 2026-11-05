@@ -39,6 +39,22 @@ abstract class NuniStore extends ChangeNotifier {
   Future<String?> answerNot(String id, String action);
   Future<String?> logFeed();
 
+  /// 가전 모형 시연(시연용 온도·CO₂를 가전 정책에만 보낸다). 실제 센서 값과 기록은 그대로다.
+  static const applianceDemoSeconds = 30;
+  DateTime? applianceDemoUntil;
+  bool applianceDemoBusy = false;
+  bool get applianceDemoActive {
+    final until = applianceDemoUntil;
+    return until != null && DateTime.now().isBefore(until);
+  }
+
+  /// seconds가 0이면 끝내기. 실패하면 사용자에게 보여 줄 문구를 돌려준다.
+  Future<String?> setApplianceDemo(int seconds) async {
+    const err = '이 화면에서는 가전 시연을 할 수 없어요';
+    showNotice(err, error: true);
+    return err;
+  }
+
   String label(String action) =>
       cry?.labels[action] ?? _labelsKo[action] ?? action;
 

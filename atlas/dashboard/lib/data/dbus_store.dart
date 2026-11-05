@@ -200,6 +200,34 @@ class DbusStore extends NuniStore {
   Future<String?> logFeed() => _act('LogFeed', const [], '수유를 기록했어요');
 
   @override
+  Future<String?> setApplianceDemo(int seconds) async {
+    if (applianceDemoBusy) return null;
+    applianceDemoBusy = true;
+    _changed();
+    try {
+      final r = (jsonDecode(await _call(
+              'StartApplianceDemo', [DBusUint32(seconds)])) as Map)
+          .cast<String, dynamic>();
+      if (r['ok'] != true) {
+        final err = r['error'] as String? ?? '가전 시연을 시작하지 못했어요';
+        showNotice(err, error: true);
+        return err;
+      }
+      applianceDemoUntil =
+          seconds > 0 ? DateTime.now().add(Duration(seconds: seconds)) : null;
+      showNotice(seconds > 0 ? '가전 시연을 시작했어요 · $seconds초' : '가전 시연을 끝냈어요');
+      return null;
+    } catch (e) {
+      final err = '${_describe(e)}. 가전 시연을 시작하지 못했어요';
+      showNotice(err, error: true);
+      return err;
+    } finally {
+      applianceDemoBusy = false;
+      _changed();
+    }
+  }
+
+  @override
   void dispose() {
     _disposed = true;
     for (final s in _subs) {
