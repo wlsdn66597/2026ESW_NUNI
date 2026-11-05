@@ -8,14 +8,16 @@ import signal
 import time
 import uuid
 import paho.mqtt.client as mqtt
-from rule import TemperatureRule, HumidityRule, ROLES, PREFIX
+from rule import TemperatureRule, Co2Rule, HumidityRule, ROLES, PREFIX
 from thinq_mock import ThinQMock
 
 LOG = logging.getLogger("nuni-appliance-policy")
 
 
 async def run(args):
-    rule = TemperatureRule(args.on_below, args.off_at, args.hold)
+    # Each demonstrator follows its own reading: air conditioner = temperature, air purifier = CO2.
+    rules = {"air_conditioner": TemperatureRule(args.cool_on_at, args.cool_off_at, args.hold),
+             "air_purifier": Co2Rule(args.co2_on_above, args.co2_off_at, args.hold)}
     humidity = HumidityRule(args.humidity_on_below, args.humidity_off_at, args.hold)
     incoming = queue.Queue(maxsize=64)
     stopped = asyncio.Event()
@@ -53,23 +55,25 @@ async def run(args):
                 for _ in range(64):
                     try: data = incoming.get_nowait()
                     except queue.Empty: break
-                    rule.update(data, wall, mono)
+                    for rule in rules.values(): rule.update(data, wall, mono)
                     humidity.update(data, wall, mono)
-                rule.tick(mono, connected)
+                for rule in rules.values(): rule.tick(mono, connected)
                 humidity.tick(mono, connected)
-                state = (rule.on, rule.reason, humidity.on, humidity.reason)
+                state = tuple((r.on, r.reason) for r in rules.values()) + (humidity.on, humidity.reason)
                 if connected and (mono >= next_send or state != last_state):
                     for role in ROLES:
+                        rule = rules[role]
                         result = await thinq.control(role, rule.on)
                         command = {"v": 1, "id": uuid.uuid4().hex, "role": role, "on": rule.on,
                             "mode": "thinq_sdk_mock", "issued_at": wall, "expires_at": wall + 6,
-                            "reason": rule.reason, "temp": rule.temp, "sample_id": rule.sample_id,
+                            "reason": rule.reason, rule.key: rule.value, "sample_id": rule.sample_id,
                             "input_topic": args.topic, "thinq": result}
                         client.publish(f"{PREFIX}/{role}/command", json.dumps(command), qos=1, retain=False)
                     client.publish(f"{PREFIX}/policy", json.dumps({"v": 1, "mode": "thinq_sdk_mock",
-                        "cloud_confirmed": False, "desired_on": rule.on, "reason": rule.reason,
-                        "temp": rule.temp, "on_below_c": rule.on_below, "off_at_c": rule.off_at,
-                        "input_topic": args.topic, "ts": wall}), retain=False)
+                        "cloud_confirmed": False, "input_topic": args.topic, "ts": wall,
+                        "roles": {role: {"desired_on": r.on, "reason": r.reason, "input": r.key, "value": r.value,
+                                         "on_at": r.on_at, "off_at": r.off_at} for role, r in rules.items()}}),
+                        retain=False)
                     if not args.demo_input:
                         client.publish("control/humidifier/command", json.dumps({"v": 1,
                             "id": uuid.uuid4().hex, "role": "humidifier", "mode": "local_relay",
@@ -81,7 +85,8 @@ async def run(args):
                             "off_at_pct": humidity.off_at, "ts": wall}), retain=False)
                     next_send = mono + 2
                 if state != last_state:
-                    LOG.info("demo desired_on=%s reason=%s temp=%s", rule.on, rule.reason, rule.temp)
+                    LOG.info("demo %s", " ".join(f"{role}={r.on}({r.reason}, {r.key}={r.value})"
+                                                 for role, r in rules.items()))
                     last_state = state
                 await asyncio.sleep(.1)
     finally:
@@ -92,8 +97,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=1883)
-    p.add_argument("--on-below", type=float, default=22)
-    p.add_argument("--off-at", type=float, default=22.5)
+    p.add_argument("--cool-on-at", type=float, default=26, help="air conditioner ON at/above this C")
+    p.add_argument("--cool-off-at", type=float, default=24, help="air conditioner OFF at/below this C")
+    p.add_argument("--co2-on-above", type=float, default=1000, help="air purifier ON above this ppm")
+    p.add_argument("--co2-off-at", type=float, default=800, help="air purifier OFF at/below this ppm")
     p.add_argument("--hold", type=float, default=3)
     p.add_argument("--humidity-on-below", type=float, default=35)
     p.add_argument("--humidity-off-at", type=float, default=40)
