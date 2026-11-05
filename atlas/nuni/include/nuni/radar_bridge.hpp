@@ -25,7 +25,8 @@ struct RadarConfig {
   std::string prefix = "mr60bha2";      // NUNI_ESPHOME_PREFIX
   double apnea_hold_s = 20;             // NUNI_APNEA_HOLD_S — 낮은 호흡이 이만큼 이어지면 무호흡
   double apnea_low_br = 5;              // NUNI_APNEA_LOW_BR — 원본이 이 값 이하이면 '호흡 약함'으로 센다
-  double apnea_require_prior_s = 120;   // NUNI_APNEA_PRIOR_S — 이 시간 안에 유효 호흡을 본 적이 있어야 카운트 시작
+  double apnea_require_prior_s = 120;   // NUNI_APNEA_PRIOR_S — 이 시간 안에 유효 호흡을 본 적이 있어야 카운트 시작.
+                                        //   마지막 유효 호흡 후 이 시간이 지나면 무호흡 판정도 끝낸다(예전 동작, 정지 물체 오경보 방지)
   double stale_s = 10;                  // NUNI_RADAR_STALE_S
   double move_window_s = 2.0;           // NUNI_MOVE_WINDOW_S
   double move_scale_cm = 30;            // NUNI_MOVE_SCALE_CM — 이만큼 변동 = 움직임 1.0
@@ -79,6 +80,7 @@ class RadarBridge {
   std::deque<std::pair<double, double>> dist_hist_;  // (ts, distance_cm)
   std::deque<std::pair<double, double>> br_hist_;    // (ts, bpm) — 게이팅을 통과한 유효값만
   std::optional<double> low_since_;                  // 원본이 apnea_low_br 이하로 떨어진 시각(카운트 중일 때만)
+  std::optional<double> low_baseline_;               // 카운트를 시작할 때의 마지막 유효 호흡 시각(대상이 사라져도 유지)
   std::optional<double> last_valid_;                 // 마지막 유효 호흡 시각
   std::optional<double> tof_mm_;                     // 최근 유효 ToF 거리
   double tof_rx_ = -1;                               // 최근 ToF 수신 시각(무효 측정 포함)

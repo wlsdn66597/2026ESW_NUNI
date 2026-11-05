@@ -153,6 +153,7 @@ std::optional<double> RadarBridge::smoothed_breath(double now) {
 
 void RadarBridge::stop_low_breath() {
   low_since_.reset();
+  low_baseline_.reset();
   tof_ref_.reset();
 }
 
@@ -169,10 +170,15 @@ void RadarBridge::update_low_breath(std::optional<double> raw, bool presence, st
     const bool had_baseline = last_valid_ && (now - *last_valid_) <= cfg_.apnea_require_prior_s;
     if (presence && in_range(dist) && movement_valid && move <= cfg_.move_reject && had_baseline) {
       low_since_ = now;
+      low_baseline_ = last_valid_;
       if (tof_known) tof_ref_ = tof_mm_;
     }
     return;
   }
+  // 마지막 유효 호흡 후 apnea_require_prior_s가 지나면 판정을 끝낸다(예전 동작). 아무것도 없는데
+  // 레이더가 정지 물체를 대상으로 잡으면 경보가 끝없이 이어지던 문제(2026-11-05 실측 11분)를 막는다.
+  // 유효 호흡을 다시 보기 전에는 새 카운트도 시작하지 않는다(시작 조건의 had_baseline).
+  if (low_baseline_ && now - *low_baseline_ > cfg_.apnea_require_prior_s) { stop_low_breath(); return; }
   // 카운트 중: 재실이 꺼져도 계속 센다. 난간 ToF가 크게 바뀌면(안아 올림·일어남) 이탈로 보고 멈춘다.
   // ToF가 무효·오래됨이면 변화를 알 수 없으므로 계속 센다(놓치는 것보다 오경보가 낫다).
   if (tof_known) {

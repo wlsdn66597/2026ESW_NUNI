@@ -66,6 +66,7 @@ _state = {"breath": None, "heart": None, "presence": None,
 _dist_hist = collections.deque()            # (ts, distance_cm)
 _br_hist = collections.deque()              # (ts, bpm) — 게이팅 통과한 유효값만(최근 창)
 _low_since = [None]                         # 원본이 APNEA_LOW_BR 이하로 떨어진 시각(카운트 중일 때만)
+_low_baseline = [None]                      # 카운트를 시작할 때의 마지막 유효 호흡 시각(대상이 사라져도 유지)
 _last_valid = [None]                        # 마지막 유효 호흡 시각(창 밖까지 기억 — 무호흡/미측정 구분용)
 _tof = {"mm": None, "rx": -1, "ref": None}  # 난간 ToF: 최근 유효 거리·수신 시각·카운트 시작 때 거리
 
@@ -141,6 +142,7 @@ def smoothed_breath(now):
 
 def _stop_low_breath():
     _low_since[0] = None
+    _low_baseline[0] = None
     _tof["ref"] = None
 
 
@@ -153,6 +155,7 @@ def update_low_breath(raw, presence, dist, mv, move, now):
       - 카운트 중 재실이 꺼져도 계속(숨이 멈추면 레이더가 대상을 놓칠 수 있다)
       - 난간 ToF가 크게 바뀌면(안아 올림·일어남) 이탈로 보고 멈춤. ToF를 모르면 계속 센다
       - 레이더 수신이 끊기면(raw 없음) 셀 수 없으므로 멈춘다
+      - 마지막 유효 호흡 후 APNEA_REQUIRE_PRIOR_S가 지나면 판정을 끝낸다(예전 동작, 정지 물체 오경보 방지)
     """
     low = raw is not None and not math.isnan(raw) and raw <= APNEA_LOW_BR
     if not low:
@@ -162,8 +165,11 @@ def update_low_breath(raw, presence, dist, mv, move, now):
         had_baseline = _last_valid[0] is not None and (now - _last_valid[0]) <= APNEA_REQUIRE_PRIOR_S
         if presence and in_range(dist) and mv and move <= MOVE_REJECT and had_baseline:
             _low_since[0] = now
+            _low_baseline[0] = _last_valid[0]
             if tof_known: _tof["ref"] = _tof["mm"]
         return
+    if _low_baseline[0] is not None and now - _low_baseline[0] > APNEA_REQUIRE_PRIOR_S:
+        _stop_low_breath(); return
     if tof_known:
         if _tof["ref"] is None: _tof["ref"] = _tof["mm"]
         elif abs(_tof["mm"] - _tof["ref"]) >= TOF_LEAVE_MM:

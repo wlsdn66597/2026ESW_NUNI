@@ -109,6 +109,24 @@ int main(){
     std::cout<<"PASS apnea count keeps going on target loss unless rail ToF changes\n";
   }
   {
+    RadarBridge g;  // 2026-11-05 실측: 아무것도 없는데 레이더가 정지 물체를 '대상 있음·호흡 0'으로 계속 보냄
+    auto feed=[&](double t,const char* br){
+      g.on_esphome("mr60bha2/presence","ON",t);g.on_esphome("mr60bha2/distance","40",t);
+      g.on_esphome("mr60bha2/breath_rate",br,t);return *g.step(t);};
+    for(int t=0;t<10;++t)feed(t,"18");  // 마지막 유효 호흡 t=9
+    for(int t=10;t<30;++t)feed(t,"0");
+    assert(feed(30,"0")["apnea"]==true);
+    for(int t=31;t<129;++t)feed(t,"0");
+    assert(feed(129,"0")["apnea"]==true);   // 마지막 유효 호흡 후 120초까지는 경보 유지
+    auto ended=feed(130,"0");
+    assert(ended["apnea"]==false && ended["low_breath_s"].is_null());  // 예전처럼 120초가 지나면 판정 종료
+    for(int t=131;t<400;++t)assert(feed(t,"0")["apnea"]==false);    // 유효 호흡을 다시 보기 전에는 재시작하지 않는다
+    for(int t=400;t<410;++t)feed(t,"18");
+    for(int t=410;t<430;++t)feed(t,"0");
+    assert(feed(430,"0")["apnea"]==true);   // 호흡이 다시 잡힌 뒤의 무호흡은 다시 판정한다
+    std::cout<<"PASS apnea judgement ends 120s after the last valid breath (still-object false alarm)\n";
+  }
+  {
     double now=200;std::vector<Json> alerts;
     Fusion g([&](const auto& topic,const auto& p){if(topic==topics::ALERT)alerts.push_back(p);},2,10,[&]{return now;});
     auto a=radar();a["apnea"]=true;a["breath_valid"]=false;
